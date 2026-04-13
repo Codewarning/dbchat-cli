@@ -47,6 +47,30 @@ function buildInteractiveChoices<T extends string>(choices: SelectChoice<T>[], d
   }));
 }
 
+function getTerminalWidth(output: NodeJS.WriteStream): number {
+  return Math.max(1, output.columns ?? 80);
+}
+
+function wrapTerminalLine(line: string, width: number): string[] {
+  if (!line) {
+    return [""];
+  }
+
+  const chunks: string[] = [];
+  let index = 0;
+  while (index < line.length) {
+    chunks.push(line.slice(index, index + width));
+    index += width;
+  }
+
+  return chunks.length ? chunks : [""];
+}
+
+function buildRenderedTerminalLines(lines: string[], output: NodeJS.WriteStream): string[] {
+  const width = getTerminalWidth(output);
+  return lines.flatMap((line) => wrapTerminalLine(line, width));
+}
+
 async function selectByNumber<T extends string>(
   question: (prompt: string) => Promise<string>,
   message: string,
@@ -236,7 +260,7 @@ async function promptInteractiveSelect<T extends string>(
 
   const render = () => {
     clearRender();
-    const lines = [
+    const logicalLines = [
       message,
       ...choices.map((choice, index) => {
         const isActive = index === activeIndex;
@@ -246,9 +270,10 @@ async function promptInteractiveSelect<T extends string>(
       }),
       "Use Up/Down to choose and Enter to confirm.",
     ];
+    const renderedLines = buildRenderedTerminalLines(logicalLines, output);
 
-    output.write(`${lines.join("\n")}\n`);
-    renderedLineCount = lines.length + 1;
+    output.write(`${renderedLines.join("\n")}\n`);
+    renderedLineCount = renderedLines.length + 1;
   };
 
   return await new Promise<T>((resolve, reject) => {
