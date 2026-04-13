@@ -1,5 +1,5 @@
 // Centralized provider and runtime defaults used by init prompts and config resolution.
-import type { AppRuntimeConfig, LlmApiFormat, LlmProvider } from "../types/index.js";
+import type { AppRuntimeConfig, EmbeddingProvider, LlmApiFormat, LlmProvider } from "../types/index.js";
 
 /**
  * Default connection metadata associated with a named LLM provider preset.
@@ -11,6 +11,16 @@ export interface LlmProviderPreset {
   defaultModel: string;
 }
 
+/**
+ * Default connection metadata associated with a named embedding provider preset.
+ */
+export interface EmbeddingProviderPreset {
+  label: string;
+  defaultBaseUrl: string;
+  defaultModel: string;
+  modelChoices: readonly string[];
+}
+
 export const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 export const DEFAULT_OPENAI_MODEL = "gpt-5-mini";
 export const DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1";
@@ -18,11 +28,11 @@ export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-20250514";
 export const DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1";
 export const DEFAULT_DEEPSEEK_MODEL = "deepseek-chat";
 export const DEFAULT_CUSTOM_MODEL = "custom-model";
-export const DEFAULT_EMBEDDING_MODEL_URL =
-  "https://huggingface.co/ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/resolve/main/embeddinggemma-300m-qat-Q8_0.gguf";
-export const DEFAULT_EMBEDDING_MODEL_FALLBACK_URL =
-  "https://hf-mirror.com/ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/resolve/main/embeddinggemma-300m-qat-Q8_0.gguf";
-export const DEFAULT_EMBEDDING_MODEL_DOWNLOAD_URLS = [DEFAULT_EMBEDDING_MODEL_URL, DEFAULT_EMBEDDING_MODEL_FALLBACK_URL] as const;
+export const DEFAULT_ALIYUN_EMBEDDING_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+export const DEFAULT_ALIYUN_EMBEDDING_MODEL = "text-embedding-v4";
+export const DEFAULT_OPENAI_EMBEDDING_BASE_URL = DEFAULT_OPENAI_BASE_URL;
+export const DEFAULT_OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
+export const DEFAULT_CUSTOM_EMBEDDING_MODEL = "custom-embedding-model";
 export const DEFAULT_POSTGRES_PORT = 5432;
 export const DEFAULT_MYSQL_PORT = 3306;
 
@@ -59,11 +69,39 @@ export const LLM_PROVIDER_PRESETS: Record<LlmProvider, LlmProviderPreset> = {
   },
 };
 
+export const EMBEDDING_PROVIDER_PRESETS: Record<EmbeddingProvider, EmbeddingProviderPreset> = {
+  aliyun: {
+    label: "Aliyun Bailian",
+    defaultBaseUrl: DEFAULT_ALIYUN_EMBEDDING_BASE_URL,
+    defaultModel: DEFAULT_ALIYUN_EMBEDDING_MODEL,
+    modelChoices: ["text-embedding-v4", "text-embedding-v3", "text-embedding-v2"],
+  },
+  openai: {
+    label: "OpenAI",
+    defaultBaseUrl: DEFAULT_OPENAI_EMBEDDING_BASE_URL,
+    defaultModel: DEFAULT_OPENAI_EMBEDDING_MODEL,
+    modelChoices: ["text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"],
+  },
+  custom: {
+    label: "Custom",
+    defaultBaseUrl: DEFAULT_OPENAI_BASE_URL,
+    defaultModel: DEFAULT_CUSTOM_EMBEDDING_MODEL,
+    modelChoices: [],
+  },
+};
+
 /**
  * Look up the built-in preset metadata for one provider name.
  */
 export function getLlmProviderPreset(provider: LlmProvider): LlmProviderPreset {
   return LLM_PROVIDER_PRESETS[provider];
+}
+
+/**
+ * Look up the built-in preset metadata for one embedding provider name.
+ */
+export function getEmbeddingProviderPreset(provider: EmbeddingProvider): EmbeddingProviderPreset {
+  return EMBEDDING_PROVIDER_PRESETS[provider];
 }
 
 /**

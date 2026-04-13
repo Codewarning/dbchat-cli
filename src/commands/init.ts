@@ -8,6 +8,7 @@ import {
 import { getConfigPath, loadNormalizedStoredConfig, saveNormalizedStoredConfig } from "../config/store.js";
 import type { AppRuntimeConfig, LlmApiFormat, LlmProvider } from "../types/index.js";
 import { defaultPromptRuntime, type PromptRuntime } from "../ui/prompts.js";
+import { promptEmbeddingConfig } from "./embedding-config-helpers.js";
 import {
   buildCommonValueChoices,
   ensureUniqueDatabaseName,
@@ -134,6 +135,7 @@ export async function handleInitCommand(prompts: PromptRuntime = defaultPromptRu
       "Custom model",
     ),
   };
+  existing.embedding = await promptEmbeddingConfig(prompts, existing.embedding);
 
   const hostConfig = await promptDatabaseHostConfig(prompts, activeHost ?? undefined);
   ensureUniqueHostName(existing, hostConfig.name, activeHost?.name);

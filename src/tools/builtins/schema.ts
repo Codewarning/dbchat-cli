@@ -155,7 +155,7 @@ export const searchSchemaCatalogTool = defineTool(
     const catalog = await loadReadySchemaCatalog(context);
     const limit = Math.min(args.limit ?? 5, 10);
     context.io.log(`Searching schema catalog: ${args.query}`);
-    const result = await searchLocalSchemaCatalog(catalog, args.query, limit, context.io);
+    const result = await searchLocalSchemaCatalog(context.config, catalog, args.query, limit);
     context.io.log(`Schema catalog search found ${result.totalMatches} matches`);
     return result;
   },

@@ -4,15 +4,16 @@ import {
   DEFAULT_APP_CONFIG,
   getDefaultBaseUrlForApiFormat,
   getDefaultModelForApiFormat,
+  getEmbeddingProviderPreset,
   getLlmProviderPreset,
 } from "./defaults.js";
 import { normalizeStoredConfig, resolveStoredDatabaseConfig, toStoredConfig } from "./database-hosts.js";
 import { getConfigPath } from "./paths.js";
 import { appConfigSchema, storedConfigSchema } from "./schema.js";
-import { getEmbeddingModelInfo, isEmbeddingModelDownloaded, resolveEmbeddingModelUrl } from "../embedding/model.js";
+import { getEmbeddingModelInfo } from "../embedding/config.js";
 import { writeFileAtomic } from "../fs/atomic-write.js";
 import { DEFAULT_DATABASE_OPERATION_ACCESS } from "../db/operation-access.js";
-import type { AppConfig, DatabaseDialect, LlmApiFormat, LlmProvider, StoredConfig } from "../types/index.js";
+import type { AppConfig, DatabaseDialect, EmbeddingProvider, LlmApiFormat, LlmProvider, StoredConfig } from "../types/index.js";
 
 export { getConfigDirectory, getConfigPath } from "./paths.js";
 
@@ -90,6 +91,14 @@ function resolveLlmProvider(stored: StoredConfig, env: NodeJS.ProcessEnv): LlmPr
 }
 
 /**
+ * Resolve the embedding provider after applying environment overrides.
+ */
+function resolveEmbeddingProvider(stored: StoredConfig, env: NodeJS.ProcessEnv): EmbeddingProvider {
+  const envProvider = env.DBCHAT_EMBEDDING_PROVIDER as EmbeddingProvider | undefined;
+  return envProvider ?? stored.embedding?.provider ?? "aliyun";
+}
+
+/**
  * Resolve the API wire format for the selected provider.
  */
 function resolveLlmApiFormat(provider: LlmProvider, stored: StoredConfig, env: NodeJS.ProcessEnv): LlmApiFormat {
@@ -128,12 +137,30 @@ function resolveLlmApiKey(provider: LlmProvider, apiFormat: LlmApiFormat, stored
 }
 
 /**
+ * Resolve the API key source for the selected embedding provider.
+ */
+function resolveEmbeddingApiKey(provider: EmbeddingProvider, stored: StoredConfig, env: NodeJS.ProcessEnv): string {
+  switch (provider) {
+    case "aliyun":
+      return pickFirstNonEmpty(env.DBCHAT_EMBEDDING_API_KEY, env.DASHSCOPE_API_KEY, stored.embedding?.apiKey) ?? "";
+    case "openai":
+      return pickFirstNonEmpty(env.DBCHAT_EMBEDDING_API_KEY, env.OPENAI_API_KEY, stored.embedding?.apiKey) ?? "";
+    case "custom":
+      return pickFirstNonEmpty(env.DBCHAT_EMBEDDING_API_KEY, stored.embedding?.apiKey) ?? "";
+    default:
+      return "";
+  }
+}
+
+/**
  * Merge stored config, environment overrides, and provider defaults into one validated runtime config.
  */
 export function buildResolvedAppConfig(stored: StoredConfig, env: NodeJS.ProcessEnv = process.env): AppConfig {
   const provider = resolveLlmProvider(stored, env);
   const apiFormat = resolveLlmApiFormat(provider, stored, env);
   const providerPreset = getLlmProviderPreset(provider);
+  const embeddingProvider = resolveEmbeddingProvider(stored, env);
+  const embeddingPreset = getEmbeddingProviderPreset(embeddingProvider);
   const selectedDatabase = resolveStoredDatabaseConfig(stored);
   const envDialect = env.DBCHAT_DB_DIALECT as DatabaseDialect | undefined;
   const dialect = envDialect ?? selectedDatabase.dialect ?? "postgres";
@@ -158,6 +185,12 @@ export function buildResolvedAppConfig(stored: StoredConfig, env: NodeJS.Process
         pickFirstNonEmpty(env.DBCHAT_LLM_MODEL, stored.llm?.model) ??
         (provider === "custom" ? getDefaultModelForApiFormat(apiFormat) : providerPreset.defaultModel),
     },
+    embedding: {
+      provider: embeddingProvider,
+      baseUrl: pickFirstNonEmpty(env.DBCHAT_EMBEDDING_BASE_URL, stored.embedding?.baseUrl) ?? embeddingPreset.defaultBaseUrl,
+      apiKey: resolveEmbeddingApiKey(embeddingProvider, stored, env),
+      model: pickFirstNonEmpty(env.DBCHAT_EMBEDDING_MODEL, stored.embedding?.model) ?? embeddingPreset.defaultModel,
+    },
     database: {
       ...resolvedDatabaseIdentity,
       username: pickFirstNonEmpty(env.DBCHAT_DB_USER, selectedDatabase.username) ?? "",
@@ -181,8 +214,15 @@ export async function resolveAppConfig(): Promise<AppConfig> {
  */
 export async function getMaskedConfig(): Promise<Record<string, unknown>> {
   const config = normalizeStoredConfig(await loadStoredConfig());
-  const modelUrl = resolveEmbeddingModelUrl();
-  const modelInfo = getEmbeddingModelInfo(modelUrl);
+  const embeddingInfo =
+    config.embedding?.provider && config.embedding.baseUrl && config.embedding.model
+      ? getEmbeddingModelInfo({
+          provider: config.embedding.provider,
+          baseUrl: config.embedding.baseUrl,
+          apiKey: config.embedding.apiKey ?? "",
+          model: config.embedding.model,
+        })
+      : null;
 
   return {
     llm: {
@@ -193,10 +233,12 @@ export async function getMaskedConfig(): Promise<Record<string, unknown>> {
       apiKey: config.llm?.apiKey ? "******" : null,
       model: config.llm?.model ?? null,
     },
-    localEmbedding: {
-      modelUrl,
-      modelPath: modelInfo.modelPath,
-      downloaded: await isEmbeddingModelDownloaded(modelUrl),
+    embedding: {
+      provider: config.embedding?.provider ?? null,
+      baseUrl: config.embedding?.baseUrl ?? null,
+      apiKey: config.embedding?.apiKey ? "******" : null,
+      model: config.embedding?.model ?? null,
+      identity: embeddingInfo?.modelId ?? null,
     },
     databaseSelection: {
       activeHost: config.activeDatabaseHost ?? null,

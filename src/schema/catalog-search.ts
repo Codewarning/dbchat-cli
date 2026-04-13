@@ -1,7 +1,7 @@
 import { embedText } from "../embedding/client.js";
-import { getEmbeddingModelInfo } from "../embedding/model.js";
+import { getEmbeddingModelInfo } from "../embedding/config.js";
 import type {
-  AgentIO,
+  EmbeddingConfig,
   SchemaCatalog,
   SchemaCatalogSearchMatch,
   SchemaCatalogSearchResult,
@@ -81,18 +81,18 @@ function cosineSimilarity(left: readonly number[], right: readonly number[]): nu
 }
 
 /**
- * Ensure the persisted catalog was built with the current embedding model.
+ * Ensure the persisted catalog was built with the current embedding configuration.
  */
-export function isSchemaCatalogCompatible(catalog: SchemaCatalog): boolean {
-  return catalog.embeddingModelUrl === getEmbeddingModelInfo().modelId;
+export function isSchemaCatalogCompatible(catalog: SchemaCatalog, embeddingConfig: EmbeddingConfig): boolean {
+  return catalog.embeddingModelId === getEmbeddingModelInfo(embeddingConfig).modelId;
 }
 
 /**
- * Ensure the persisted catalog was built with the current embedding model.
+ * Ensure the persisted catalog was built with the current embedding configuration.
  */
-function ensureCatalogEmbeddingCompatibility(catalog: SchemaCatalog): void {
-  if (!isSchemaCatalogCompatible(catalog)) {
-    throw new Error("The local schema catalog was built with a different embedding model. Run 'dbchat catalog sync' to rebuild it.");
+function ensureCatalogEmbeddingCompatibility(catalog: SchemaCatalog, embeddingConfig: EmbeddingConfig): void {
+  if (!isSchemaCatalogCompatible(catalog, embeddingConfig)) {
+    throw new Error("The local schema catalog was built with a different embedding configuration. Run 'dbchat catalog sync' to rebuild it.");
   }
 }
 
@@ -248,9 +248,9 @@ export function suggestCatalogTableNames(catalog: SchemaCatalog, query: string, 
  */
 export async function searchSchemaCatalog(
   catalog: SchemaCatalog,
+  embeddingConfig: EmbeddingConfig,
   query: string,
   limit = 5,
-  io?: Pick<AgentIO, "createProgressHandle">,
 ): Promise<SchemaCatalogSearchResult> {
   const normalizedLimit = Number.isInteger(limit) && limit > 0 ? limit : 5;
   const normalizedQuery = query.trim();
@@ -262,9 +262,9 @@ export async function searchSchemaCatalog(
     };
   }
 
-  ensureCatalogEmbeddingCompatibility(catalog);
+  ensureCatalogEmbeddingCompatibility(catalog, embeddingConfig);
   const queryVector = await embedText(normalizedQuery, {
-    createModelDownloadProgressHandle: (message) => io?.createProgressHandle?.(message),
+    config: embeddingConfig,
   });
   const rankedMatches = catalog.tables
     .map((table) => scoreCatalogTable(table, normalizedQuery, queryVector))

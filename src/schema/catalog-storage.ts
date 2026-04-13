@@ -5,7 +5,7 @@ import { getConfigDirectory } from "../config/paths.js";
 import { writeFileAtomic } from "../fs/atomic-write.js";
 import type { DatabaseConfig, SchemaCatalog } from "../types/index.js";
 
-export const SCHEMA_CATALOG_VERSION = 5;
+export const SCHEMA_CATALOG_VERSION = 6;
 
 /**
  * Build a filesystem-safe fragment for one database identifier component.

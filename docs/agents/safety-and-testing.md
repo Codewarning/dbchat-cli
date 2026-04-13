@@ -53,6 +53,7 @@ Built CLI usage:
 ### If you changed config
 
 - `init` still prompts for provider and database values
+- `init` still prompts for embedding provider, base URL, model, and API key values
 - database switching still prompts for the runtime operation-access preset, defaulting to `read-only`
 - stored database configs still omit any persisted operation-access field
 - password prompts still mask typed secrets in interactive terminals
@@ -82,6 +83,7 @@ Built CLI usage:
 ### If you changed schema introspection or catalog behavior
 
 - `catalog sync` still writes a refreshed snapshot for the active database
+- `catalog sync` still requires a working embedding API config and rebuilds when the embedding configuration changes
 - schema-catalog tools still load or refresh a compatible local schema catalog when they need it
 - `describe_table` still returns accurate column definitions
 

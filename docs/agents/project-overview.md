@@ -15,9 +15,11 @@ The repo is intentionally small and layered. Avoid turning it into a framework-h
 ## Core User Modes
 
 - `init`
-  Configure LLM provider, API format, base URL, model, and database connection.
+  Configure LLM provider, embedding provider, base URL, model, and database connection.
 - `config show`
   Show masked config.
+- `config embedding update`
+  Reopen only the embedding API configuration flow.
 - `schema`
   Inspect tables or a single table definition.
 - `catalog`
@@ -53,6 +55,7 @@ The repo is intentionally small and layered. Avoid turning it into a framework-h
 
 - Local config file: `~/.db-chat-cli/config.json`
   - stores LLM settings
+  - stores embedding API settings
   - stores multiple database host configs
   - stores multiple database names under each host
   - stores the active host/database selection
@@ -60,8 +63,6 @@ The repo is intentionally small and layered. Avoid turning it into a framework-h
 - Local schema catalog directory: `~/.db-chat-cli/schema-catalog/`
   - stores one schema snapshot per physical database target in nested directories grouped by dialect, host-port, and database
   - stores table-level hashes, LLM-generated descriptions/tags, and embedding vectors used before live introspection
-- Local model directory: `~/.db-chat-cli/models/`
-  - stores the downloaded GGUF embedding model used for semantic table indexing and search
 - In-memory state only for:
   - current plan
   - latest query result

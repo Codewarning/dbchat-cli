@@ -5,6 +5,7 @@ import { z } from "zod";
 export const databaseDialectSchema = z.enum(["postgres", "mysql"]);
 export const llmProviderSchema = z.enum(["openai", "anthropic", "deepseek", "custom"]);
 export const llmApiFormatSchema = z.enum(["openai", "anthropic"]);
+export const embeddingProviderSchema = z.enum(["aliyun", "openai", "custom"]);
 export const databaseOperationAccessSchema = z.enum([
   "read_only",
   "select_update",
@@ -16,6 +17,13 @@ export const databaseOperationAccessSchema = z.enum([
 export const llmConfigSchema = z.object({
   provider: llmProviderSchema,
   apiFormat: llmApiFormatSchema,
+  baseUrl: z.string().min(1),
+  apiKey: z.string(),
+  model: z.string().min(1),
+});
+
+export const embeddingConfigSchema = z.object({
+  provider: embeddingProviderSchema,
   baseUrl: z.string().min(1),
   apiKey: z.string(),
   model: z.string().min(1),
@@ -56,6 +64,7 @@ export const appRuntimeConfigSchema = z.object({
 
 export const storedConfigSchema = z.object({
   llm: llmConfigSchema.partial().optional(),
+  embedding: embeddingConfigSchema.partial().optional(),
   databaseHosts: z.array(storedDatabaseHostSchema).optional(),
   activeDatabaseHost: z.string().min(1).optional(),
   activeDatabaseName: z.string().min(1).optional(),
@@ -64,6 +73,7 @@ export const storedConfigSchema = z.object({
 
 export const appConfigSchema = z.object({
   llm: llmConfigSchema,
+  embedding: embeddingConfigSchema,
   database: databaseConfigSchema,
   app: appRuntimeConfigSchema,
 });

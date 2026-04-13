@@ -62,6 +62,7 @@ function normalizeActiveSelection(config: NormalizedStoredConfig): void {
 export function normalizeStoredConfig(stored: StoredConfig): NormalizedStoredConfig {
   const normalized: NormalizedStoredConfig = {
     llm: stored.llm ? { ...stored.llm } : undefined,
+    embedding: stored.embedding ? { ...stored.embedding } : undefined,
     app: stored.app ? { ...stored.app } : undefined,
     databaseHosts: (stored.databaseHosts ?? []).map(cloneDatabaseHost),
     activeDatabaseHost: stored.activeDatabaseHost,
@@ -78,6 +79,7 @@ export function normalizeStoredConfig(stored: StoredConfig): NormalizedStoredCon
 export function toStoredConfig(config: NormalizedStoredConfig): StoredConfig {
   return {
     llm: config.llm ? { ...config.llm } : undefined,
+    embedding: config.embedding ? { ...config.embedding } : undefined,
     app: config.app ? { ...config.app } : undefined,
     databaseHosts: config.databaseHosts.map(cloneDatabaseHost),
     activeDatabaseHost: config.activeDatabaseHost,

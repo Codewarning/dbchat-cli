@@ -2,6 +2,7 @@
 export type DatabaseDialect = "postgres" | "mysql";
 export type LlmProvider = "openai" | "anthropic" | "deepseek" | "custom";
 export type LlmApiFormat = "openai" | "anthropic";
+export type EmbeddingProvider = "aliyun" | "openai" | "custom";
 export type SqlExecutionCategory = "read_only" | "dml" | "ddl" | "unknown";
 export type SqlApprovalDecision = "approve_once" | "approve_all" | "reject";
 export type DatabaseOperationAccess = "read_only" | "select_update" | "select_update_delete" | "select_update_delete_ddl";
@@ -31,6 +32,16 @@ export type SqlOperation =
 export interface LlmConfig {
   provider: LlmProvider;
   apiFormat: LlmApiFormat;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
+/**
+ * Resolved embedding API settings used for schema-catalog indexing and search.
+ */
+export interface EmbeddingConfig {
+  provider: EmbeddingProvider;
   baseUrl: string;
   apiKey: string;
   model: string;
@@ -86,6 +97,7 @@ export interface AppRuntimeConfig {
  */
 export interface AppConfig {
   llm: LlmConfig;
+  embedding: EmbeddingConfig;
   database: DatabaseConfig;
   app: AppRuntimeConfig;
 }
@@ -95,6 +107,7 @@ export interface AppConfig {
  */
 export interface StoredConfig {
   llm?: Partial<LlmConfig>;
+  embedding?: Partial<EmbeddingConfig>;
   databaseHosts?: StoredDatabaseHost[];
   activeDatabaseHost?: string;
   activeDatabaseName?: string;
@@ -186,7 +199,7 @@ export interface SchemaCatalog {
   schema?: string;
   generatedAt: string;
   tableCount: number;
-  embeddingModelUrl: string;
+  embeddingModelId: string;
   tables: SchemaCatalogTable[];
 }
 

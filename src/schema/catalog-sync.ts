@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { DatabaseAdapter } from "../db/adapter.js";
 import { embedTexts } from "../embedding/client.js";
-import { getEmbeddingModelInfo } from "../embedding/model.js";
+import { getEmbeddingModelInfo } from "../embedding/config.js";
 import type { AgentIO, AppConfig, SchemaCatalog, SchemaCatalogSyncResult, SchemaCatalogTable, TableColumn, TableSchema } from "../types/index.js";
 import { TABLE_ANALYSIS_BATCH_SIZE, analyzeTableBatchForSearch, buildTableEmbeddingText } from "./catalog-enrichment.js";
 import { isSchemaCatalogCompatible } from "./catalog-search.js";
@@ -100,8 +100,8 @@ export async function ensureSchemaCatalogReady(
 ): Promise<{ catalog: SchemaCatalog; refreshed: boolean; result: SchemaCatalogSyncResult | null }> {
   const existingCatalog = await loadSchemaCatalog(appConfig.database);
   if (existingCatalog) {
-    if (!isSchemaCatalogCompatible(existingCatalog)) {
-      io.log("Local schema catalog is incompatible with the current embedding model. Rebuilding it now.");
+    if (!isSchemaCatalogCompatible(existingCatalog, appConfig.embedding)) {
+      io.log("Local schema catalog is incompatible with the current embedding configuration. Rebuilding it now.");
     } else {
       const freshness = await io.withLoading("Checking schema catalog freshness", () => assessSchemaCatalogFreshness(existingCatalog, db));
       if (freshness.fresh) {
@@ -147,7 +147,7 @@ function chunkItems<T>(items: readonly T[], size: number): T[][] {
 }
 
 /**
- * Map items with a bounded worker pool to avoid overloading local embedding work.
+ * Map items with a bounded worker pool to avoid overloading remote indexing work.
  */
 async function mapWithConcurrency<T, R>(
   items: readonly T[],
@@ -207,7 +207,7 @@ async function buildCatalogTablesBatch(
     return buildTableEmbeddingText(table, metadata);
   });
   const embeddingVectors = await embedTexts(embeddingTexts, {
-    createModelDownloadProgressHandle: (message) => io?.createProgressHandle?.(message),
+    config: appConfig.embedding,
   });
 
   return tables.map((table, index) => {
@@ -244,9 +244,9 @@ async function buildSchemaCatalog(
   previousCatalog?: SchemaCatalog | null,
   io?: Pick<AgentIO, "createProgressHandle">,
 ): Promise<{ catalog: SchemaCatalog; reindexedTableCount: number; reusedIndexCount: number }> {
-  const embeddingModelInfo = getEmbeddingModelInfo();
+  const embeddingModelInfo = getEmbeddingModelInfo(appConfig.embedding);
   const previousTables = new Map(previousCatalog?.tables.map((table) => [table.tableName, table]) ?? []);
-  const canReusePreviousIndex = previousCatalog?.embeddingModelUrl === embeddingModelInfo.modelId;
+  const canReusePreviousIndex = previousCatalog?.embeddingModelId === embeddingModelInfo.modelId;
   const normalizedTables: SchemaCatalogTable[] = [];
   const tablesToIndex: TableSchema[] = [];
   let reindexedTableCount = 0;
@@ -296,7 +296,7 @@ async function buildSchemaCatalog(
       schema: appConfig.database.schema,
       generatedAt: new Date().toISOString(),
       tableCount: normalizedTables.length,
-      embeddingModelUrl: embeddingModelInfo.modelId,
+      embeddingModelId: embeddingModelInfo.modelId,
       tables: normalizedTables,
     },
     reindexedTableCount,

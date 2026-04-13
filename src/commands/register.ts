@@ -13,6 +13,7 @@ import {
   handleConfigDbUpdateHostCommand,
   handleConfigDbUseDatabaseCommand,
   handleConfigDbUseHostCommand,
+  handleConfigEmbeddingUpdateCommand,
   handleConfigShowCommand,
   handleExplainCommand,
   handleSchemaCommand,
@@ -69,6 +70,8 @@ export function registerCommands(program: Command): void {
 
   const configCommand = program.command("config").description("Inspect local configuration");
   configCommand.command("show").description("Show the current configuration with secrets masked").action(handleConfigShowCommand);
+  const embeddingConfigCommand = configCommand.command("embedding").description("Manage the stored embedding API configuration");
+  embeddingConfigCommand.command("update").description("Update the stored embedding API configuration").action(handleConfigEmbeddingUpdateCommand);
 
   const databaseConfigCommand = configCommand.command("db").description("Manage stored database host and database configs");
   databaseConfigCommand.command("list").description("List all stored host and database configs").action(handleConfigDbListCommand);

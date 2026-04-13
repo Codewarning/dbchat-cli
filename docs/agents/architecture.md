@@ -120,7 +120,7 @@ Responsibilities:
 - compute table-level hashes for refresh diffing
 - generate LLM-backed table descriptions and tags for retrieval
 - persist one embedding vector per table for semantic search
-- use the local `node-llama-cpp` embedding model for indexing and query embeddings
+- use a configured OpenAI-compatible embedding API for indexing and query embeddings
 - provide searchable table summaries before live introspection
 - reduce prompt pressure by letting the model search candidate tables first
 

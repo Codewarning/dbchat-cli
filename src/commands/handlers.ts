@@ -1,6 +1,5 @@
 import { AgentSession } from "../agent/session.js";
 import { assessSqlSafety } from "../db/safety.js";
-import { ensureEmbeddingModelReady } from "../embedding/model.js";
 import { defaultPromptRuntime } from "../ui/prompts.js";
 import { getConfigPath, getMaskedConfig } from "../config/store.js";
 import type { ChatRuntimeState } from "../repl/runtime.js";
@@ -17,6 +16,7 @@ import {
   useDatabaseConfig,
   useHostConfig,
 } from "./database-config.js";
+import { updateEmbeddingConfig } from "./embedding-config.js";
 import { printDatabaseConfigList } from "./database-config-helpers.js";
 import {
   printQueryResult,
@@ -154,7 +154,6 @@ export async function handleChatCommand(): Promise<void> {
  */
 export async function handleCatalogSyncCommand(): Promise<void> {
   await withRuntime(async ({ config, db, io }) => {
-    await ensureEmbeddingModelReady(io);
     const synced = await refreshLocalSchemaCatalog(config, db, io);
     printSchemaCatalogSyncResult(synced.result);
   });
@@ -165,7 +164,6 @@ export async function handleCatalogSyncCommand(): Promise<void> {
  */
 export async function handleCatalogSearchCommand(query: string, limit: number): Promise<void> {
   await withRuntime(async ({ config, db, io }) => {
-    await ensureEmbeddingModelReady(io);
     const searched = await searchReadyLocalSchemaCatalog(config, db, io, query, limit);
     printSchemaCatalogSearch(searched.search);
   });
@@ -178,6 +176,14 @@ export async function handleConfigShowCommand(): Promise<void> {
   const masked = await getMaskedConfig();
   console.log(`Config file: ${getConfigPath()}`);
   console.log(JSON.stringify(masked, null, 2));
+}
+
+/**
+ * Update the stored embedding provider configuration.
+ */
+export async function handleConfigEmbeddingUpdateCommand(): Promise<void> {
+  const result = await updateEmbeddingConfig(defaultPromptRuntime);
+  console.log(result.message);
 }
 
 /**

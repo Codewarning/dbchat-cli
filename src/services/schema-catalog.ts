@@ -39,12 +39,12 @@ export async function ensureLocalSchemaCatalogReady(
  * Search one already-loaded schema catalog with the same ranking used by tools.
  */
 export async function searchLocalSchemaCatalog(
+  config: AppConfig,
   catalog: SchemaCatalog,
   query: string,
   limit: number,
-  io?: Pick<AgentIO, "createProgressHandle">,
 ): Promise<SchemaCatalogSearchResult> {
-  return searchSchemaCatalog(catalog, query, limit, io);
+  return searchSchemaCatalog(catalog, config.embedding, query, limit);
 }
 
 /**
@@ -60,6 +60,6 @@ export async function searchReadyLocalSchemaCatalog(
   const ready = await ensureLocalSchemaCatalogReady(config, db, io);
   return {
     ...ready,
-    search: await searchLocalSchemaCatalog(ready.catalog, query, limit, io),
+    search: await searchLocalSchemaCatalog(config, ready.catalog, query, limit),
   };
 }

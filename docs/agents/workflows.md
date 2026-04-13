@@ -95,7 +95,7 @@ Path:
 3. compute deterministic table hashes and searchable summaries
 4. reuse unchanged table index entries when the schema hash matches
 5. batch new or changed tables into a small number of LLM requests for descriptions and tags
-6. embed the enriched table documents with the local GGUF embedding model
+6. embed the enriched table documents with the configured remote embedding API
 7. write the refreshed catalog under `~/.db-chat-cli/schema-catalog/` in nested directories grouped by dialect, host-port, and database
 
 Key files:
@@ -117,11 +117,9 @@ Provider resolution is config-driven:
 1. load stored config
 2. resolve the active stored host/database selection
 3. merge environment variable overrides
-4. resolve provider preset
-5. resolve API format
-6. resolve default base URL and model
-7. resolve the provider-specific API key source
-8. resolve the final runtime database target
+4. resolve the LLM provider preset, API format, default base URL, model, and API key
+5. resolve the embedding provider preset, default base URL, model, and API key
+6. resolve the final runtime database target
 
 Key file:
 
@@ -163,4 +161,23 @@ Key files:
 
 - `src/commands/register.ts`
 - `src/config/database-hosts.ts`
+- `src/config/store.ts`
+
+## Workflow 8: Embedding Config Management
+
+Entry:
+
+- `dbchat config embedding update`
+
+Path:
+
+1. load normalized stored config
+2. reopen the interactive embedding provider prompt flow
+3. save provider, base URL, API key, and model back to the stored config
+
+Key files:
+
+- `src/commands/register.ts`
+- `src/commands/embedding-config.ts`
+- `src/commands/embedding-config-helpers.ts`
 - `src/config/store.ts`
