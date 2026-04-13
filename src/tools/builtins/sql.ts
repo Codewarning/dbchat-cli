@@ -7,14 +7,17 @@ import {
   buildPreviewTable,
   clipMiddle,
   clipText,
-  compactRows,
+  compactValue,
   isRecord,
   stringifyCompact,
 } from "../serialize-helpers.js";
 import { defineTool } from "../specs.js";
 
-const MAX_MODEL_PREVIEW_ROWS = 5;
+const MAX_MODEL_PREVIEW_ROWS = 3;
+const MAX_MODEL_PREVIEW_FIELDS = 8;
+const MAX_MODEL_TABLE_PREVIEW_FIELDS = 6;
 const MAX_SQL_CHARS = 800;
+const MAX_MODEL_PLAN_PREVIEW_CHARS = 1200;
 
 const runSqlSchema = z.object({
   sql: z.string().min(1),
@@ -24,6 +27,16 @@ const runSqlSchema = z.object({
 const explainSqlSchema = z.object({
   sql: z.string().min(1),
 });
+
+function projectRowsForModel(
+  rows: Record<string, unknown>[],
+  fields: string[],
+  previewLimit: number,
+): Record<string, unknown>[] {
+  return rows.slice(0, previewLimit).map((row) =>
+    Object.fromEntries(fields.map((field) => [field, compactValue(row[field])])) as Record<string, unknown>,
+  );
+}
 
 function serializeQueryResultForModel(
   result: QueryExecutionResult & {
@@ -40,9 +53,12 @@ function serializeQueryResultForModel(
   appConfig: AppRuntimeConfig,
 ) {
   const previewLimit = Math.min(appConfig.previewRowLimit, MAX_MODEL_PREVIEW_ROWS);
+  const previewFields = result.fields.slice(0, MAX_MODEL_PREVIEW_FIELDS);
+  const omittedFieldCount = Math.max(0, result.fields.length - previewFields.length);
   const previewSource = Array.isArray(result.previewRows) ? result.previewRows : result.rows;
-  const previewRows = compactRows(previewSource, previewLimit);
-  const previewTable = buildPreviewTable(previewRows, result.fields);
+  const previewRows = projectRowsForModel(previewSource, previewFields, previewLimit);
+  const previewTable =
+    previewFields.length <= MAX_MODEL_TABLE_PREVIEW_FIELDS ? buildPreviewTable(previewRows, previewFields) : undefined;
   const catalogRefresh =
     isRecord(result.catalogRefresh) && result.catalogRefresh.status !== "not_needed"
       ? {
@@ -67,7 +83,8 @@ function serializeQueryResultForModel(
     rowCount: result.rowCount,
     cachedRowCount: result.rows.length,
     rowsTruncated: result.rowsTruncated,
-    fields: result.fields,
+    fields: previewFields,
+    omittedFieldCount,
     elapsedMs: result.elapsedMs,
     previewRows,
     previewTable,
@@ -75,11 +92,15 @@ function serializeQueryResultForModel(
     catalogRefresh,
   };
 
-  const fieldSummary = result.fields.length ? ` Fields: ${result.fields.join(", ")}.` : "";
+  const fieldSummary = previewFields.length
+    ? ` Fields: ${previewFields.join(", ")}${omittedFieldCount ? ` (+${omittedFieldCount} more)` : ""}.`
+    : "";
   const truncationSummary = result.rowsTruncated ? ` Cached rows were limited to ${result.rows.length}.` : "";
   const catalogRefreshSummary =
     catalogRefresh?.status === "refreshed"
       ? " Schema catalog refreshed after the schema change."
+      : catalogRefresh?.status === "skipped"
+        ? " Schema catalog refresh was skipped because remote data transfer was not approved."
       : catalogRefresh?.status === "failed"
         ? ` Schema catalog refresh failed: ${catalogRefresh.error ?? "unknown error"}.`
         : "";
@@ -126,7 +147,7 @@ function serializeExplainResult(result: QueryPlanResult) {
     operation: result.operation,
     elapsedMs: result.elapsedMs,
     warnings: result.warnings,
-    planPreview: buildPlanPreview(result.rawPlan),
+    planPreview: clipMiddle(buildPlanPreview(result.rawPlan), MAX_MODEL_PLAN_PREVIEW_CHARS),
   };
 
   const warningSummary = result.warnings.length ? ` Warnings: ${result.warnings.join("; ")}.` : "";
@@ -235,6 +256,7 @@ export const explainSqlTool = defineTool(
       io: context.io,
       sql: args.sql,
     });
+    context.setLastExplain(plan);
     context.io.log(`Explain completed in ${plan.elapsedMs.toFixed(2)}ms`);
     return plan;
   },

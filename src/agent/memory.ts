@@ -36,6 +36,7 @@ export const MAX_RAW_HISTORY_CHARS = 7000;
 const MAX_ROLLING_SUMMARY_CHARS = 2400;
 const MAX_TURN_SUMMARY_CHARS = 480;
 const MAX_MEMORY_ENTRY_CHARS = 320;
+const MAX_ARCHIVED_DETAIL_LINES = 4;
 
 /**
  * Collapse repeated whitespace to reduce prompt noise.
@@ -123,28 +124,91 @@ export function summarizeToolCall(toolCall: LlmToolCall): string {
   return `Tool call: ${toolCall.function.name} ${args}`;
 }
 
+function takeTailEntriesByCharBudget(items: string[], maxChars: number): string[] {
+  const selected: string[] = [];
+  let usedChars = 0;
+
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    const nextSize = item.length + (selected.length ? 2 : 0);
+    if (selected.length && usedChars + nextSize > maxChars) {
+      break;
+    }
+
+    if (!selected.length && item.length > maxChars) {
+      selected.unshift(clipText(item, maxChars));
+      break;
+    }
+
+    selected.unshift(item);
+    usedChars += nextSize;
+  }
+
+  return selected;
+}
+
+function pushUniqueLine(lines: string[], line: string | undefined): void {
+  if (!line || lines.includes(line)) {
+    return;
+  }
+
+  lines.push(line);
+}
+
+function buildCondensedTurnSummaryLines(lines: string[]): string[] {
+  const normalizedLines = lines.map((line) => line.trim()).filter(Boolean);
+  const userRequest = normalizedLines.find((line) => line.startsWith("User request:"));
+  const finalAnswer = [...normalizedLines].reverse().find((line) => line.startsWith("Final answer:"));
+  const toolCallCount = normalizedLines.filter((line) => line.startsWith("Tool call:")).length;
+  const detailedOutcomeLines = normalizedLines.filter(
+    (line) =>
+      !line.startsWith("User request:") &&
+      !line.startsWith("Final answer:") &&
+      !line.startsWith("Tool call:") &&
+      !line.startsWith("Request intent:"),
+  );
+  const selectedLines: string[] = [];
+
+  pushUniqueLine(selectedLines, userRequest);
+  for (const line of detailedOutcomeLines.slice(-MAX_ARCHIVED_DETAIL_LINES)) {
+    pushUniqueLine(selectedLines, line);
+  }
+
+  if (!detailedOutcomeLines.length) {
+    for (const line of normalizedLines.slice(-2)) {
+      pushUniqueLine(selectedLines, line);
+    }
+  }
+
+  if (toolCallCount > 0) {
+    pushUniqueLine(selectedLines, `Tool steps executed: ${toolCallCount}.`);
+  }
+  pushUniqueLine(selectedLines, finalAnswer);
+  return selectedLines;
+}
+
 /**
  * Collapse one completed turn into a single archived summary string.
  */
 export function buildArchivedTurnSummary(turn: ConversationTurn): string {
-  return clipText(turn.summaryLines.join("\n"), MAX_TURN_SUMMARY_CHARS);
+  return clipText(buildCondensedTurnSummaryLines(turn.summaryLines).join("\n"), MAX_TURN_SUMMARY_CHARS);
 }
 
 /**
  * Merge older archived summaries into the rolling summary window.
  */
 export function mergeRollingSummary(existing: string, additions: string[]): string {
-  const merged = [existing, ...additions]
+  const mergedEntries = [...existing.split(/\n{2,}/), ...additions]
     .map((entry) => entry.trim())
-    .filter(Boolean)
-    .join("\n\n");
+    .filter(Boolean);
+  const selectedEntries = takeTailEntriesByCharBudget(mergedEntries, MAX_ROLLING_SUMMARY_CHARS - 31);
+  const merged = selectedEntries.join("\n\n");
 
-  if (merged.length <= MAX_ROLLING_SUMMARY_CHARS) {
+  if (mergedEntries.length === selectedEntries.length && merged.length <= MAX_ROLLING_SUMMARY_CHARS) {
     return merged;
   }
 
-  const suffix = merged.slice(-(MAX_ROLLING_SUMMARY_CHARS - 31));
-  return `Older context was truncated.\n${suffix}`;
+  return `Older context was truncated.\n${merged}`;
 }
 
 /**

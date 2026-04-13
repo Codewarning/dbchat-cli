@@ -144,6 +144,7 @@ The catalog is stored locally under `~/.db-chat-cli/schema-catalog/` in nested d
 The on-disk directory name remains `~/.db-chat-cli/` for compatibility with existing local installs.
 `ask` and `chat` no longer force a schema-catalog refresh before the session starts.
 The catalog is checked lazily when a schema-catalog tool is actually used, and only then rebuilt if it is missing, stale, or incompatible with the current embedding model.
+Before `ask`, `chat`, `catalog sync`, or `catalog search` send database-derived data to remote LLM or embedding APIs, the CLI now asks for explicit confirmation.
 
 ## Environment Variables
 
@@ -178,6 +179,7 @@ node dist/index.js chat
 ```
 
 The interactive chat session stays open after each LLM reply. It only exits when you enter `/exit` or terminate the process yourself.
+Before the session starts, the CLI asks for confirmation because chat mode can send prompts, schema metadata, executed SQL text, and bounded result previews to the configured remote APIs.
 When `chat` runs in a TTY terminal, it now uses a React Ink interface with:
 
 - an initial Codex-style welcome splash at the top of the transcript, with later chat appended below it
@@ -207,6 +209,8 @@ node dist/index.js ask "Show the order volume trend for the last 7 days"
 node dist/index.js ask "Analyze this SQL for performance and suggest improvements"
 ```
 
+Before the request is sent, the CLI asks for confirmation because `ask` can send prompts, schema metadata, executed SQL text, and bounded result previews to the configured remote APIs.
+
 ### Execute SQL Directly
 
 ```bash
@@ -216,7 +220,7 @@ node dist/index.js sql "select * from users limit 10"
 Read-only SQL executes immediately.
 DML, DDL, and unclassified SQL that are allowed by the active database access level require approval with three choices: `Approve Once`, `Approve All For Turn`, or `Reject`.
 If the current database access level does not allow the statement, the CLI rejects it before opening the approval prompt.
-If a successful statement changes tracked table structure, such as `CREATE TABLE`, `ALTER TABLE`, `DROP TABLE`, or `RENAME TABLE`, the CLI now refreshes the local schema catalog automatically after execution.
+If a successful statement changes tracked table structure, such as `CREATE TABLE`, `ALTER TABLE`, `DROP TABLE`, or `RENAME TABLE`, the CLI refreshes the local schema catalog after execution only when you approve the required remote metadata transfer. Otherwise it skips the refresh and keeps the original SQL success result.
 
 ### Show an Execution Plan
 
@@ -244,6 +248,8 @@ For PostgreSQL, the CLI currently shows a reconstructed DDL assembled from syste
 node dist/index.js catalog sync
 node dist/index.js catalog search "order items"
 ```
+
+Both commands now ask for confirmation before they send schema metadata or search text to the configured remote APIs.
 
 ### Show Current Configuration
 
@@ -401,8 +407,11 @@ Typing `@` opens the live database picker for the current host. Use Up/Down to c
 - The CLI supports both OpenAI-compatible tool calling and Anthropic tool calling.
 - Database config supports multiple host configs and multiple database names under each host, with active host/database switching through CLI commands and live database discovery during `use-database`.
 - Non-interactive terminal commands keep progress output compact by default, while `chat` keeps richer interactive feedback.
-- Chat sessions compress older turns into structured summaries and retain only a small recent raw window, so token usage stays bounded during longer conversations.
-- Tool results sent back to the model are compact payloads rather than full raw JSON results.
+- Chat sessions compress older turns into structured summaries, keep only a small recent raw window, and pack prior context into each LLM request only when the current prompt appears to need it.
+- Request-aware context packing now distinguishes fresh query/schema/explain requests from result/export/explain follow-ups, so schema memory, query memory, and cached result summaries are only attached when they are likely relevant.
+- Older archived turns now keep user request, key outcomes, and final conclusion ahead of raw tool traces, so long chats preserve higher-value context in less space.
+- The latest cached query result and latest cached EXPLAIN output can be re-inspected through dedicated tools, so follow-up turns do not need to keep carrying large previews by default.
+- Tool results sent back to the model are compact payloads rather than full raw JSON results, with wide SQL results and large EXPLAIN outputs trimmed by default because the cache-inspection tools can fetch more detail on demand.
 
 ## Next Steps
 

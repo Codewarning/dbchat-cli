@@ -64,11 +64,13 @@ Responsibilities:
 - maintain compressed conversation memory plus a recent raw-turn window
 - maintain in-memory plan
 - maintain latest query result
-- keep request-intent heuristics, message assembly, and tool execution helpers separated so the session coordinator can stay focused on control flow
+- keep request-intent heuristics, finer-grained request context classification, request-aware context packing, message assembly, and tool execution helpers separated so the session coordinator can stay focused on control flow
 - execute the minimal loop:
   - send messages to LLM
   - process tool calls
   - feed compact tool results back
+  - compact long assistant replies before they enter future prompt history
+  - archive older turns as high-value summaries that prefer request, outcome, and conclusion lines over raw tool traces
   - stop on final answer
 
 ### 4. LLM Layer
@@ -100,6 +102,8 @@ Responsibilities:
 - define the tool surface available to the model
 - validate and execute tool calls from a shared spec registry
 - summarize tool results before they are sent back into model-visible history
+- expose cached-result and cached-explain inspection so the model can fetch more detail on demand instead of carrying large previews forward
+- keep default SQL and EXPLAIN payloads tight enough that wide result sets and large plans do not dominate later turns
 - enforce confirmation gates
 - hold the boundary between model intent and side effects
 

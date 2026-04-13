@@ -2,9 +2,20 @@ import type { LlmMessageParam } from "../llm/types.js";
 import type { AppConfig, PlanItem, QueryExecutionResult } from "../types/index.js";
 import { estimateTurnSize, MAX_RAW_HISTORY_CHARS, type ConversationTurn, type SessionContextMemory } from "./memory.js";
 import { buildContextPrompt, buildSystemPrompt } from "./prompts.js";
+import { buildContextPromptProfile } from "./session-policy.js";
 
-function getRecentRawMessages(completedTurns: ConversationTurn[], currentTurn: ConversationTurn | null): LlmMessageParam[] {
-  const turns = currentTurn ? [...completedTurns, currentTurn] : [...completedTurns];
+function getRecentRawMessages(
+  completedTurns: ConversationTurn[],
+  currentTurn: ConversationTurn | null,
+  includePreviousTurns: boolean,
+): LlmMessageParam[] {
+  const turns = includePreviousTurns
+    ? currentTurn
+      ? [...completedTurns, currentTurn]
+      : [...completedTurns]
+    : currentTurn
+      ? [currentTurn]
+      : [];
   const selectedTurns: ConversationTurn[] = [];
   let usedChars = 0;
 
@@ -33,7 +44,16 @@ export function buildSessionMessages(
   memory: SessionContextMemory,
   completedTurns: ConversationTurn[],
   currentTurn: ConversationTurn | null,
+  currentInput: string,
 ): LlmMessageParam[] {
+  const contextProfile = buildContextPromptProfile(currentInput, {
+    hasPlan: plan.length > 0,
+    hasLastResult: Boolean(lastResult),
+    hasSchemaMemory: Boolean(memory.lastSchemaSummary || memory.describedTables.length),
+    hasRecentQueryMemory: Boolean(memory.recentQueries.length),
+    hasLastExplainSummary: Boolean(memory.lastExplainSummary),
+    hasLastExportSummary: Boolean(memory.lastExportSummary),
+  });
   const messages: LlmMessageParam[] = [
     {
       role: "system",
@@ -41,7 +61,7 @@ export function buildSessionMessages(
     },
   ];
 
-  const contextPrompt = buildContextPrompt(plan, lastResult, memory);
+  const contextPrompt = buildContextPrompt(plan, lastResult, memory, contextProfile);
   if (contextPrompt) {
     messages.push({
       role: "system",
@@ -49,6 +69,6 @@ export function buildSessionMessages(
     });
   }
 
-  messages.push(...getRecentRawMessages(completedTurns, currentTurn));
+  messages.push(...getRecentRawMessages(completedTurns, currentTurn, contextProfile.includePriorRawTurns));
   return messages;
 }

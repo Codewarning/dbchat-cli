@@ -3,7 +3,7 @@ import type { AgentIO, AppConfig, SchemaCatalogSyncResult, SqlOperation } from "
 import { syncSchemaCatalog } from "./catalog-sync.js";
 
 export interface SchemaCatalogRefreshOutcome {
-  status: "not_needed" | "refreshed" | "failed";
+  status: "not_needed" | "refreshed" | "failed" | "skipped";
   reason: string;
   result?: SchemaCatalogSyncResult;
   error?: string;
@@ -71,11 +71,20 @@ export async function refreshSchemaCatalogAfterSqlIfNeeded(
   io: AgentIO,
   sql: string,
   operation: SqlOperation,
+  allowRemoteRefresh = true,
 ): Promise<SchemaCatalogRefreshOutcome> {
   if (!shouldRefreshSchemaCatalogAfterSql(sql, operation)) {
     return {
       status: "not_needed",
       reason: "The executed SQL did not change tracked table structure.",
+    };
+  }
+
+  if (!allowRemoteRefresh) {
+    io.log("Schema catalog refresh skipped because remote data transfer was not approved.");
+    return {
+      status: "skipped",
+      reason: "The SQL statement succeeded, but the schema catalog refresh was skipped because remote data transfer was not approved.",
     };
   }
 

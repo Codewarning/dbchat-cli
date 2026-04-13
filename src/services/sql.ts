@@ -1,6 +1,6 @@
 import type { DatabaseAdapter } from "../db/adapter.js";
 import { ensureSingleStatement } from "../db/safety.js";
-import { refreshSchemaCatalogAfterSqlIfNeeded, type SchemaCatalogRefreshOutcome } from "../schema/catalog.js";
+import { refreshSchemaCatalogAfterSqlIfNeeded, shouldRefreshSchemaCatalogAfterSql, type SchemaCatalogRefreshOutcome } from "../schema/catalog.js";
 import { executeSqlStatement, type ExecuteSqlStatementOptions, type SqlExecutionCancelled, type SqlExecutionSuccess } from "../sql/execution.js";
 import type { AgentIO, AppConfig, MutationApprovalState, QueryPlanResult } from "../types/index.js";
 
@@ -10,6 +10,7 @@ export interface ExecuteManagedSqlOptions {
   io: AgentIO;
   sql: string;
   approvalState?: MutationApprovalState;
+  confirmSchemaCatalogRefresh?: () => Promise<boolean>;
 }
 
 export interface ManagedSqlExecutionSuccess extends SqlExecutionSuccess {
@@ -38,6 +39,10 @@ export async function executeManagedSql(options: ExecuteManagedSqlOptions): Prom
     return execution;
   }
 
+  const schemaRefreshNeeded = shouldRefreshSchemaCatalogAfterSql(options.sql, execution.safety.operation);
+  const allowSchemaCatalogRefresh =
+    schemaRefreshNeeded && options.confirmSchemaCatalogRefresh ? await options.confirmSchemaCatalogRefresh() : true;
+
   return {
     ...execution,
     catalogRefresh: await refreshSchemaCatalogAfterSqlIfNeeded(
@@ -46,6 +51,7 @@ export async function executeManagedSql(options: ExecuteManagedSqlOptions): Prom
       options.io,
       options.sql,
       execution.safety.operation,
+      allowSchemaCatalogRefresh,
     ),
   };
 }

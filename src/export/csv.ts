@@ -1,5 +1,5 @@
 // Result export helpers keep file-format concerns out of the tool registry.
-import { mkdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { ExportResult, QueryExecutionResult } from "../types/index.js";
 
@@ -18,17 +18,32 @@ function escapeCsvValue(value: unknown): string {
 /**
  * Resolve an export path and reject targets that escape the active working directory.
  */
-function resolveOutputPath(cwd: string, outputPath: string): string {
+export async function resolveOutputPathForExport(cwd: string, outputPath: string): Promise<string> {
   const resolved = path.isAbsolute(outputPath) ? outputPath : path.resolve(cwd, outputPath);
-  const normalizedCwd = path.resolve(cwd);
-  const relativePath = path.relative(normalizedCwd, resolved);
+  const resolvedParent = path.dirname(resolved);
+  await mkdir(resolvedParent, { recursive: true });
+
+  const [realCwd, realParent] = await Promise.all([realpath(cwd), realpath(resolvedParent)]);
+  const finalPath = path.join(realParent, path.basename(resolved));
+  const relativePath = path.relative(realCwd, finalPath);
 
   // Exports are intentionally sandboxed to the current working directory.
   if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
     throw new Error("The export path must stay within the current working directory.");
   }
 
-  return resolved;
+  try {
+    const targetStats = await lstat(finalPath);
+    if (targetStats.isSymbolicLink()) {
+      throw new Error("The export path cannot point to a symbolic link.");
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  return finalPath;
 }
 
 /**
@@ -40,8 +55,7 @@ export async function exportQueryResult(
   outputPath: string,
   cwd: string,
 ): Promise<ExportResult> {
-  const resolvedPath = resolveOutputPath(cwd, outputPath);
-  await mkdir(path.dirname(resolvedPath), { recursive: true });
+  const resolvedPath = await resolveOutputPathForExport(cwd, outputPath);
 
   if (format === "json") {
     // JSON exports preserve the raw row objects for downstream tooling.

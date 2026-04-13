@@ -65,7 +65,8 @@ The repo is intentionally small and layered. Avoid turning it into a framework-h
   - stores table-level hashes, LLM-generated descriptions/tags, and embedding vectors used before live introspection
 - In-memory state only for:
   - current plan
-  - latest query result
+  - latest query result cache used for follow-up inspection and export
+  - latest explain cache used for focused follow-up inspection
   - compressed conversation memory
   - a small recent raw-turn window
 

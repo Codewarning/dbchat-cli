@@ -36,6 +36,75 @@ const APPROVE_ONCE_VALUE: SqlApprovalDecision = "approve_once";
 const APPROVE_ALL_VALUE: SqlApprovalDecision = "approve_all";
 const REJECT_SQL_VALUE: SqlApprovalDecision = "reject";
 
+function deduplicateChoices<T extends string>(choices: SelectChoice<T>[]): SelectChoice<T>[] {
+  return choices.filter((choice, index) => choices.findIndex((candidate) => candidate.value === choice.value) === index);
+}
+
+function buildInteractiveChoices<T extends string>(choices: SelectChoice<T>[], defaultValue?: T): InteractiveSelectChoice<T>[] {
+  return choices.map((choice) => ({
+    ...choice,
+    note: choice.value === defaultValue ? "(default)" : undefined,
+  }));
+}
+
+async function selectByNumber<T extends string>(
+  question: (prompt: string) => Promise<string>,
+  message: string,
+  choices: SelectChoice<T>[],
+  defaultValue?: T,
+): Promise<T> {
+  console.log(message);
+  choices.forEach((choice, index) => {
+    const marker = choice.value === defaultValue ? " (default)" : "";
+    console.log(`  ${index + 1}. ${choice.label}${marker}`);
+  });
+
+  const answer = (await question("Enter a number: ")).trim();
+  if (!answer && defaultValue) {
+    return defaultValue;
+  }
+
+  const index = Number(answer);
+  if (!Number.isInteger(index) || index < 1 || index > choices.length) {
+    throw new Error("Invalid selection.");
+  }
+
+  return choices[index - 1]!.value;
+}
+
+export function buildSelectOrInputChoices(
+  choices: SelectChoice<string>[],
+  defaultValue = "",
+  customLabel = "Custom value",
+  customValue = CUSTOM_SELECT_VALUE,
+): {
+  choices: Array<SelectChoice<string>>;
+  defaultSelection: string | undefined;
+} {
+  const deduplicatedChoices = deduplicateChoices(choices);
+
+  if (defaultValue && !deduplicatedChoices.some((choice) => choice.value === defaultValue)) {
+    deduplicatedChoices.unshift({
+      label: defaultValue,
+      value: defaultValue,
+    });
+  }
+
+  const defaultSelection =
+    defaultValue && deduplicatedChoices.some((choice) => choice.value === defaultValue) ? defaultValue : undefined;
+
+  return {
+    choices: [
+      ...deduplicatedChoices,
+      {
+        label: customLabel,
+        value: customValue,
+      },
+    ],
+    defaultSelection,
+  };
+}
+
 /**
  * Ask one question and resolve with the raw terminal input.
  */
@@ -316,34 +385,10 @@ export async function promptSelect<T extends string>(
   defaultValue?: T,
 ): Promise<T> {
   if (process.stdin.isTTY && process.stdout.isTTY) {
-    return promptInteractiveSelect(
-      message,
-      choices.map((choice) => ({
-        ...choice,
-        note: choice.value === defaultValue ? "(default)" : undefined,
-      })),
-      defaultValue,
-    );
+    return promptInteractiveSelect(message, buildInteractiveChoices(choices, defaultValue), defaultValue);
   }
 
-  console.log(message);
-  choices.forEach((choice, index) => {
-    const marker = choice.value === defaultValue ? " (default)" : "";
-    console.log(`  ${index + 1}. ${choice.label}${marker}`);
-  });
-
-  const answer = (await ask("Enter a number: ")).trim();
-  if (!answer && defaultValue) {
-    return defaultValue;
-  }
-
-  // Number-based selection keeps the prompt simple in plain terminals.
-  const index = Number(answer);
-  if (!Number.isInteger(index) || index < 1 || index > choices.length) {
-    throw new Error("Invalid selection.");
-  }
-
-  return choices[index - 1]!.value;
+  return selectByNumber(ask, message, choices, defaultValue);
 }
 
 /**
@@ -356,27 +401,16 @@ export async function promptSelectOrInput(
   customPromptMessage = message,
   customLabel = "Custom value",
 ): Promise<string> {
-  const deduplicatedChoices = choices.filter(
-    (choice, index) => choices.findIndex((candidate) => candidate.value === choice.value) === index,
+  const { choices: preparedChoices, defaultSelection } = buildSelectOrInputChoices(
+    choices,
+    defaultValue,
+    customLabel,
+    CUSTOM_SELECT_VALUE,
   );
-
-  if (defaultValue && !deduplicatedChoices.some((choice) => choice.value === defaultValue)) {
-    deduplicatedChoices.unshift({
-      label: defaultValue,
-      value: defaultValue,
-    });
-  }
-
   const selected = await promptSelect(
     message,
-    [
-      ...deduplicatedChoices,
-      {
-        label: customLabel,
-        value: CUSTOM_SELECT_VALUE,
-      },
-    ],
-    defaultValue && deduplicatedChoices.some((choice) => choice.value === defaultValue) ? defaultValue : undefined,
+    preparedChoices,
+    defaultSelection,
   );
 
   if (selected === CUSTOM_SELECT_VALUE) {
@@ -407,23 +441,7 @@ async function selectWithQuestionReader<T extends string>(
   choices: SelectChoice<T>[],
   defaultValue?: T,
 ): Promise<T> {
-  console.log(message);
-  choices.forEach((choice, index) => {
-    const marker = choice.value === defaultValue ? " (default)" : "";
-    console.log(`  ${index + 1}. ${choice.label}${marker}`);
-  });
-
-  const answer = (await reader.question("Enter a number: ")).trim();
-  if (!answer && defaultValue) {
-    return defaultValue;
-  }
-
-  const index = Number(answer);
-  if (!Number.isInteger(index) || index < 1 || index > choices.length) {
-    throw new Error("Invalid selection.");
-  }
-
-  return choices[index - 1]!.value;
+  return selectByNumber((prompt) => reader.question(prompt), message, choices, defaultValue);
 }
 
 export function createReadlinePromptRuntime(reader: QuestionReader): PromptRuntime {
@@ -498,16 +516,7 @@ export function createReadlinePromptRuntime(reader: QuestionReader): PromptRunti
     },
     async select<T extends string>(message: string, choices: SelectChoice<T>[], defaultValue?: T) {
       if (process.stdin.isTTY && process.stdout.isTTY) {
-        return withPausedReader(() =>
-          promptInteractiveSelect(
-            message,
-            choices.map((choice) => ({
-              ...choice,
-              note: choice.value === defaultValue ? "(default)" : undefined,
-            })),
-            defaultValue,
-          ),
-        );
+        return withPausedReader(() => promptInteractiveSelect(message, buildInteractiveChoices(choices, defaultValue), defaultValue));
       }
 
       return selectWithQuestionReader(reader, message, choices, defaultValue);
@@ -519,28 +528,17 @@ export function createReadlinePromptRuntime(reader: QuestionReader): PromptRunti
       customPromptMessage = message,
       customLabel = "Custom value",
     ) {
-      const deduplicatedChoices = choices.filter(
-        (choice, index) => choices.findIndex((candidate) => candidate.value === choice.value) === index,
+      const { choices: preparedChoices, defaultSelection } = buildSelectOrInputChoices(
+        choices,
+        defaultValue,
+        customLabel,
+        CUSTOM_SELECT_VALUE,
       );
-
-      if (defaultValue && !deduplicatedChoices.some((choice) => choice.value === defaultValue)) {
-        deduplicatedChoices.unshift({
-          label: defaultValue,
-          value: defaultValue,
-        });
-      }
-
       const selected = await selectWithQuestionReader(
         reader,
         message,
-        [
-          ...deduplicatedChoices,
-          {
-            label: customLabel,
-            value: CUSTOM_SELECT_VALUE,
-          },
-        ],
-        defaultValue && deduplicatedChoices.some((choice) => choice.value === defaultValue) ? defaultValue : undefined,
+        preparedChoices,
+        defaultSelection,
       );
 
       if (selected === CUSTOM_SELECT_VALUE) {

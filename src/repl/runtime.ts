@@ -90,7 +90,7 @@ function sameRuntimeOperationAccess(left: DatabaseConfig | null | undefined, rig
 /**
  * Compare only the schema-level database identity used by conversation memory.
  */
-function sameConversationTarget(left: DatabaseConfig | null | undefined, right: DatabaseConfig | null | undefined): boolean {
+export function sameConversationTarget(left: DatabaseConfig | null | undefined, right: DatabaseConfig | null | undefined): boolean {
   if (!left || !right) {
     return !left && !right;
   }

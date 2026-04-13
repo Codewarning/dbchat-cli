@@ -5,7 +5,7 @@ import { orderDatabaseNamesForSelection, promptDatabaseOperationAccess } from ".
 import { findDatabaseEntry, findDatabaseHostByConnection } from "../config/database-hosts.js";
 import { loadNormalizedStoredConfig } from "../config/store.js";
 import type { AgentIO, DatabaseOperationAccess, PlanItem } from "../types/index.js";
-import type { PromptRuntime, SelectChoice } from "../ui/prompts.js";
+import { buildSelectOrInputChoices, type PromptRuntime, type SelectChoice } from "../ui/prompts.js";
 import { selectNextComposerHistoryEntry, selectPreviousComposerHistoryEntry } from "./input-history.js";
 import {
   createUiId,
@@ -243,26 +243,12 @@ export function useChatController({ state, io, clearScreen }: UseChatControllerA
       }));
     },
     async selectOrInput(message, choices, defaultValue = "", customPromptMessage = message, customLabel = "Custom value") {
-      const deduplicatedChoices = choices.filter((choice, index) => choices.findIndex((candidate) => candidate.value === choice.value) === index);
-
-      if (defaultValue && !deduplicatedChoices.some((choice) => choice.value === defaultValue)) {
-        deduplicatedChoices.unshift({
-          label: defaultValue,
-          value: defaultValue,
-        });
-      }
-
       const customValue = "__custom__";
+      const { choices: preparedChoices, defaultSelection } = buildSelectOrInputChoices(choices, defaultValue, customLabel, customValue);
       const selected = await promptRuntime.select(
         message,
-        [
-          ...deduplicatedChoices,
-          {
-            label: customLabel,
-            value: customValue,
-          },
-        ],
-        defaultValue && deduplicatedChoices.some((choice) => choice.value === defaultValue) ? defaultValue : undefined,
+        preparedChoices,
+        defaultSelection,
       );
 
       if (selected === customValue) {

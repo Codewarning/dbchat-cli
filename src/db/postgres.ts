@@ -36,6 +36,10 @@ interface ConstraintRow {
   constraint_columns: string[];
 }
 
+interface QueryFieldLike {
+  name: string;
+}
+
 function toTableColumn(row: ColumnRow): TableColumn {
   return {
     name: row.column_name,
@@ -138,6 +142,17 @@ function quotePostgresLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+export function getPostgresFieldNames(result: {
+  rows: Record<string, unknown>[];
+  fields?: QueryFieldLike[];
+}): string[] {
+  if (Array.isArray(result.fields) && result.fields.length) {
+    return result.fields.map((field) => field.name);
+  }
+
+  return result.rows[0] ? Object.keys(result.rows[0]) : [];
+}
+
 /**
  * PostgreSQL implementation of the shared database adapter contract.
  */
@@ -148,14 +163,14 @@ export class PostgresAdapter implements DatabaseAdapter {
    * Create a small connection pool for the configured PostgreSQL target.
    */
   constructor(private readonly config: DatabaseConfig) {
-    // RejectUnauthorized is relaxed here to support common local/self-signed development setups.
     this.pool = new Pool({
       host: config.host,
       port: config.port,
       database: config.database,
       user: config.username,
       password: config.password,
-      ssl: config.ssl ? { rejectUnauthorized: false } : undefined,
+      // Require certificate verification whenever SSL is enabled so the connection is authenticated.
+      ssl: config.ssl ? { rejectUnauthorized: true } : undefined,
     });
   }
 
@@ -270,9 +285,11 @@ export class PostgresAdapter implements DatabaseAdapter {
     const result = await this.pool.query(sql);
     const elapsedMs = performance.now() - started;
     const operation = inferSqlOperation(sql);
-    // Postgres always exposes rows as objects, so field names can be inferred from the first row.
     const rows = Array.isArray(result.rows) ? (result.rows as Record<string, unknown>[]) : [];
-    const fields = rows[0] ? Object.keys(rows[0]) : [];
+    const fields = getPostgresFieldNames({
+      rows,
+      fields: result.fields?.map((field) => ({ name: field.name })),
+    });
 
     return applyResultRowLimit(sql, operation, typeof result.rowCount === "number" ? result.rowCount : rows.length, rows, fields, elapsedMs, options);
   }

@@ -4,7 +4,7 @@ import { LlmClient } from "../llm/client.js";
 import type { LlmMessageParam, LlmToolCall, LlmToolDefinition } from "../llm/types.js";
 import { buildToolDefinitions } from "../tools/definitions.js";
 import type { ToolRuntimeContext } from "../tools/specs.js";
-import type { AgentIO, AppConfig, MutationApprovalState, PlanItem, QueryExecutionResult, SchemaCatalog } from "../types/index.js";
+import type { AgentIO, AppConfig, MutationApprovalState, PlanItem, QueryExecutionResult, QueryPlanResult, SchemaCatalog } from "../types/index.js";
 import { buildSessionMessages } from "./message-builder.js";
 import {
   appendSummaryLine,
@@ -22,6 +22,7 @@ import { isPlanResolved } from "./plan.js";
 import {
   buildExecutionIntentGuidance,
   buildFinalAgentContent,
+  compactAssistantContentForHistory,
   classifyUserRequestExecutionIntent,
   looksLikeConfirmationPrompt,
   looksLikeSqlDraftInsteadOfExecutedResult,
@@ -53,6 +54,7 @@ export class AgentSession {
   private sessionMemory: SessionContextMemory = createSessionContextMemory();
   private plan: PlanItem[] = [];
   private lastResult: QueryExecutionResult | null = null;
+  private lastExplain: QueryPlanResult | null = null;
   private schemaCatalogCache: SchemaCatalog | null = null;
 
   /**
@@ -87,6 +89,7 @@ export class AgentSession {
     this.sessionMemory = createSessionContextMemory();
     this.plan = [];
     this.lastResult = null;
+    this.lastExplain = null;
     this.schemaCatalogCache = null;
   }
 
@@ -143,6 +146,10 @@ export class AgentSession {
       getLastResult: () => this.lastResult,
       setLastResult: (result) => {
         this.lastResult = result;
+      },
+      getLastExplain: () => this.lastExplain,
+      setLastExplain: (result) => {
+        this.lastExplain = result;
       },
       mutationApproval,
     };
@@ -208,6 +215,7 @@ export class AgentSession {
           lastToolFailure,
           toolCallsThisTurn,
         });
+        this.replaceLatestAssistantMessageContent(compactAssistantContentForHistory(finalContent));
         this.finalizeCurrentTurn(finalContent);
         return {
           content: finalContent,
@@ -258,7 +266,15 @@ export class AgentSession {
    * Build the next prompt from fixed policy, compressed memory, and a bounded raw history window.
    */
   private buildMessages(): LlmMessageParam[] {
-    return buildSessionMessages(this.config, this.plan, this.lastResult, this.sessionMemory, this.completedTurns, this.currentTurn);
+    return buildSessionMessages(
+      this.config,
+      this.plan,
+      this.lastResult,
+      this.sessionMemory,
+      this.completedTurns,
+      this.currentTurn,
+      this.getCurrentTurnInput(),
+    );
   }
 
   /**
@@ -285,6 +301,45 @@ export class AgentSession {
     }
 
     this.currentTurn.messages.push(message);
+  }
+
+  /**
+   * Read the current turn's original user input for request-aware prompt packing.
+   */
+  private getCurrentTurnInput(): string {
+    if (!this.currentTurn) {
+      return "";
+    }
+
+    for (const message of this.currentTurn.messages) {
+      if (message.role === "user") {
+        return message.content;
+      }
+    }
+
+    return "";
+  }
+
+  /**
+   * Keep the user-visible answer intact while shrinking the assistant text stored in future prompt history.
+   */
+  private replaceLatestAssistantMessageContent(content: string): void {
+    if (!this.currentTurn) {
+      return;
+    }
+
+    for (let index = this.currentTurn.messages.length - 1; index >= 0; index -= 1) {
+      const message = this.currentTurn.messages[index];
+      if (message.role !== "assistant") {
+        continue;
+      }
+
+      this.currentTurn.messages[index] = {
+        ...message,
+        content,
+      };
+      return;
+    }
   }
 
   /**

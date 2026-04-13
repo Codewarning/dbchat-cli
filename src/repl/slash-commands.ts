@@ -16,7 +16,7 @@ import { formatDatabaseConfigListText, formatSchemaSummaryText, formatTableSchem
 import type { AgentIO, DatabaseConfig, DatabaseOperationAccess } from "../types/index.js";
 import type { PromptRuntime } from "../ui/prompts.js";
 import type { ChatRuntimeState } from "./runtime.js";
-import { synchronizeRuntimeAfterConfigChange, type RuntimeSwitchOutcome } from "./runtime.js";
+import { sameConversationTarget, synchronizeRuntimeAfterConfigChange, type RuntimeSwitchOutcome } from "./runtime.js";
 
 export interface ParsedSlashCommand {
   command: string;
@@ -49,6 +49,11 @@ export interface SlashCommandCompletion {
 
 interface RuntimeChangeHooks {
   beforePresentingRuntimeChange?(result: RuntimeSwitchOutcome): void | Promise<void>;
+}
+
+interface StoredConfigCommandOptions {
+  usage: string;
+  runAction(action: string): Promise<DatabaseConfigCommandOutcome>;
 }
 
 const SLASH_COMMAND_DEFINITIONS: SlashCommandDefinition[] = [
@@ -326,20 +331,6 @@ export function parseSchemaCommandArgs(args: string[]): ParsedSchemaArgs {
   };
 }
 
-function sameDatabaseTarget(left: DatabaseConfig | null | undefined, right: DatabaseConfig | null | undefined): boolean {
-  if (!left || !right) {
-    return !left && !right;
-  }
-
-  return (
-    left.dialect === right.dialect &&
-    left.host === right.host &&
-    left.port === right.port &&
-    left.database === right.database &&
-    left.schema === right.schema
-  );
-}
-
 async function promptRuntimeOperationAccessForSwitch(
   prompts: PromptRuntime,
   state: ChatRuntimeState,
@@ -349,8 +340,49 @@ async function promptRuntimeOperationAccessForSwitch(
     return undefined;
   }
 
-  const currentAccess = sameDatabaseTarget(state.config?.database, nextTarget) ? state.config?.database.operationAccess : undefined;
+  const currentAccess = sameConversationTarget(state.config?.database, nextTarget) ? state.config?.database.operationAccess : undefined;
   return promptDatabaseOperationAccess(prompts, currentAccess, nextTarget.database);
+}
+
+async function presentConfigCommandOutcome(
+  outcome: DatabaseConfigCommandOutcome,
+  action: string,
+  state: ChatRuntimeState,
+  prompts: PromptRuntime,
+  chatIo: AgentIO,
+  io: AgentIO,
+  presenter: SlashCommandPresenter,
+  hooks?: RuntimeChangeHooks,
+): Promise<void> {
+  const operationAccess = action === "use" ? await promptRuntimeOperationAccessForSwitch(prompts, state, outcome.nextActiveTarget) : undefined;
+  const syncResult = await synchronizeRuntimeAfterConfigChange(outcome, state, chatIo, io, operationAccess);
+  if (syncResult.clearedConversation) {
+    await hooks?.beforePresentingRuntimeChange?.(syncResult);
+  }
+  presenter.line(outcome.message);
+  syncResult.notices.forEach((notice) => presenter.line(notice));
+}
+
+async function handleStoredConfigCommand(
+  parsed: ParsedSlashCommand,
+  state: ChatRuntimeState,
+  prompts: PromptRuntime,
+  chatIo: AgentIO,
+  io: AgentIO,
+  presenter: SlashCommandPresenter,
+  hooks: RuntimeChangeHooks | undefined,
+  options: StoredConfigCommandOptions,
+): Promise<void> {
+  const action = normalizeAction(parsed.action);
+  expectMaxArgs(parsed.args, 1, options.usage);
+
+  if (action === "list") {
+    presenter.block("Stored database configs", formatDatabaseConfigListText(await loadDatabaseConfigList()));
+    return;
+  }
+
+  const outcome = await options.runAction(action);
+  await presentConfigCommandOutcome(outcome, action, state, prompts, chatIo, io, presenter, hooks);
 }
 
 /**
@@ -365,39 +397,23 @@ export async function handleHostCommand(
   presenter: SlashCommandPresenter,
   hooks?: RuntimeChangeHooks,
 ): Promise<void> {
-  const action = normalizeAction(parsed.action);
-  expectMaxArgs(parsed.args, 1, "/host [list|add|update|remove|use] [name]");
-
-  if (action === "list") {
-    presenter.block("Stored database configs", formatDatabaseConfigListText(await loadDatabaseConfigList()));
-    return;
-  }
-
-  let outcome: DatabaseConfigCommandOutcome;
-  switch (action) {
-    case "add":
-      outcome = await addHostConfig(prompts, parsed.args[0]);
-      break;
-    case "update":
-      outcome = await updateHostConfig(prompts, parsed.args[0]);
-      break;
-    case "remove":
-      outcome = await removeHostConfig(prompts, parsed.args[0]);
-      break;
-    case "use":
-      outcome = await useHostConfig(prompts, parsed.args[0]);
-      break;
-    default:
-      throw new Error("Unknown /host action. Use /host list|add|update|remove|use.");
-  }
-
-  const operationAccess = action === "use" ? await promptRuntimeOperationAccessForSwitch(prompts, state, outcome.nextActiveTarget) : undefined;
-  const syncResult = await synchronizeRuntimeAfterConfigChange(outcome, state, chatIo, io, operationAccess);
-  if (syncResult.clearedConversation) {
-    await hooks?.beforePresentingRuntimeChange?.(syncResult);
-  }
-  presenter.line(outcome.message);
-  syncResult.notices.forEach((notice) => presenter.line(notice));
+  await handleStoredConfigCommand(parsed, state, prompts, chatIo, io, presenter, hooks, {
+    usage: "/host [list|add|update|remove|use] [name]",
+    async runAction(action) {
+      switch (action) {
+        case "add":
+          return addHostConfig(prompts, parsed.args[0]);
+        case "update":
+          return updateHostConfig(prompts, parsed.args[0]);
+        case "remove":
+          return removeHostConfig(prompts, parsed.args[0]);
+        case "use":
+          return useHostConfig(prompts, parsed.args[0]);
+        default:
+          throw new Error("Unknown /host action. Use /host list|add|update|remove|use.");
+      }
+    },
+  });
 }
 
 /**
@@ -412,39 +428,23 @@ export async function handleDatabaseCommand(
   presenter: SlashCommandPresenter,
   hooks?: RuntimeChangeHooks,
 ): Promise<void> {
-  const action = normalizeAction(parsed.action);
-  expectMaxArgs(parsed.args, 1, "/database [list|add|update|remove|use] [name] [--host <hostName>]");
-
-  if (action === "list") {
-    presenter.block("Stored database configs", formatDatabaseConfigListText(await loadDatabaseConfigList()));
-    return;
-  }
-
-  let outcome: DatabaseConfigCommandOutcome;
-  switch (action) {
-    case "add":
-      outcome = await addDatabaseConfig(prompts, parsed.args[0], parsed.hostName);
-      break;
-    case "update":
-      outcome = await updateDatabaseConfig(prompts, parsed.args[0], parsed.hostName);
-      break;
-    case "remove":
-      outcome = await removeDatabaseConfig(prompts, parsed.args[0], parsed.hostName);
-      break;
-    case "use":
-      outcome = await useDatabaseConfig(prompts, parsed.args[0], parsed.hostName);
-      break;
-    default:
-      throw new Error("Unknown /database action. Use /database list|add|update|remove|use.");
-  }
-
-  const operationAccess = action === "use" ? await promptRuntimeOperationAccessForSwitch(prompts, state, outcome.nextActiveTarget) : undefined;
-  const syncResult = await synchronizeRuntimeAfterConfigChange(outcome, state, chatIo, io, operationAccess);
-  if (syncResult.clearedConversation) {
-    await hooks?.beforePresentingRuntimeChange?.(syncResult);
-  }
-  presenter.line(outcome.message);
-  syncResult.notices.forEach((notice) => presenter.line(notice));
+  await handleStoredConfigCommand(parsed, state, prompts, chatIo, io, presenter, hooks, {
+    usage: "/database [list|add|update|remove|use] [name] [--host <hostName>]",
+    async runAction(action) {
+      switch (action) {
+        case "add":
+          return addDatabaseConfig(prompts, parsed.args[0], parsed.hostName);
+        case "update":
+          return updateDatabaseConfig(prompts, parsed.args[0], parsed.hostName);
+        case "remove":
+          return removeDatabaseConfig(prompts, parsed.args[0], parsed.hostName);
+        case "use":
+          return useDatabaseConfig(prompts, parsed.args[0], parsed.hostName);
+        default:
+          throw new Error("Unknown /database action. Use /database list|add|update|remove|use.");
+      }
+    },
+  });
 }
 
 /**

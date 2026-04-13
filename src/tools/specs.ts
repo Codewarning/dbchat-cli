@@ -7,6 +7,7 @@ import type {
   AppRuntimeConfig,
   MutationApprovalState,
   PlanItem,
+  QueryPlanResult,
   QueryExecutionResult,
   SchemaCatalog,
 } from "../types/index.js";
@@ -31,6 +32,8 @@ export interface ToolRuntimeContext {
   setPlan(plan: PlanItem[]): void;
   getLastResult(): QueryExecutionResult | null;
   setLastResult(result: QueryExecutionResult | null): void;
+  getLastExplain(): QueryPlanResult | null;
+  setLastExplain(result: QueryPlanResult | null): void;
   mutationApproval: MutationApprovalState;
 }
 
