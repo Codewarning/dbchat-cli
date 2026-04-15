@@ -13,7 +13,7 @@ These rules are core product behavior, not optional implementation details.
 - exporting must stay inside the current working directory
 - export path checks must reject symlink or junction escapes outside the current working directory
 - PostgreSQL SSL must verify the server certificate when SSL is enabled
-- workflows that send database-derived data to remote LLM or embedding APIs must require explicit confirmation first
+- schema-catalog workflows that send schema metadata or search text to remote LLM or embedding APIs must require explicit confirmation first
 - the model should inspect schema before making assumptions
 
 Key enforcement points:
@@ -72,7 +72,8 @@ Built CLI usage:
 - cached query rows still respect `app.resultRowLimit`
 - schema-catalog search still returns useful table candidates before `describe_table`
 - destructive schema operations can verify live table names from the active database connection when the current table set matters
-- `ask`, `chat`, `catalog sync`, and `catalog search` still require explicit confirmation before any remote API call that includes database-derived data
+- `catalog sync` and `catalog search` still require explicit confirmation before sending schema metadata or search text to remote APIs
+- successful schema-changing SQL still leaves a clear manual `catalog sync` follow-up notice instead of auto-refreshing the schema catalog
 
 ### If you changed DB execution behavior
 
@@ -81,14 +82,15 @@ Built CLI usage:
 - mutating SQL still asks for approval
 - mutating CTE SQL still asks for approval
 - choosing `Approve All For Turn` suppresses later SQL prompts only for the current request
-- successful `CREATE TABLE`, `ALTER TABLE`, `DROP TABLE`, and similar table-shape changes refresh the local schema catalog only after explicit approval for the required remote metadata transfer, and otherwise skip the refresh with a clear notice
+- successful `CREATE TABLE`, `ALTER TABLE`, `DROP TABLE`, and similar table-shape changes keep the SQL success result and mark the local schema catalog as manually refreshable through `catalog sync`
 - multi-statement SQL is still rejected
 
 ### If you changed schema introspection or catalog behavior
 
 - `catalog sync` still writes a refreshed snapshot for the active database
 - `catalog sync` still requires a working embedding API config and rebuilds when the embedding configuration changes
-- schema-catalog tools still load or refresh a compatible local schema catalog when they need it
+- `ask`, `chat`, and live database switches still initialize a compatible local schema catalog when the database target is entered
+- schema-catalog tools still reuse the stored local schema catalog without refreshing it automatically on later tool calls
 - `describe_table` still returns accurate column definitions
 
 ## Non-Goals To Preserve

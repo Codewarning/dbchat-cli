@@ -1,5 +1,5 @@
 // Centralized provider and runtime defaults used by init prompts and config resolution.
-import type { AppRuntimeConfig, EmbeddingProvider, LlmApiFormat, LlmProvider } from "../types/index.js";
+import type { AppRuntimeConfig, ContextCompressionConfig, EmbeddingProvider, LlmApiFormat, LlmProvider } from "../types/index.js";
 
 /**
  * Default connection metadata associated with a named LLM provider preset.
@@ -36,9 +36,18 @@ export const DEFAULT_CUSTOM_EMBEDDING_MODEL = "custom-embedding-model";
 export const DEFAULT_POSTGRES_PORT = 5432;
 export const DEFAULT_MYSQL_PORT = 3306;
 
+export const DEFAULT_CONTEXT_COMPRESSION_CONFIG: ContextCompressionConfig = {
+  recentRawTurns: 2,
+  rawHistoryChars: 7000,
+  largeToolOutputChars: 2400,
+  persistedToolPreviewChars: 1200,
+  maxToolCallsPerTurn: 12,
+};
+
 export const DEFAULT_APP_CONFIG: AppRuntimeConfig = {
   resultRowLimit: 200,
   previewRowLimit: 20,
+  contextCompression: DEFAULT_CONTEXT_COMPRESSION_CONFIG,
 };
 
 // Presets keep vendor-specific defaults in one place so custom handling stays minimal elsewhere.

@@ -2,6 +2,7 @@
 import { formatAllowedOperationsForDatabaseOperationAccess, formatDatabaseOperationAccess } from "../db/operation-access.js";
 import type { AppConfig, PlanItem, QueryExecutionResult } from "../types/index.js";
 import { formatRecordsTable } from "../ui/text-table.js";
+import { formatSqlDisplayScalar } from "../ui/value-format.js";
 import type { NamedSummary, SessionContextMemory } from "./memory.js";
 import { formatPlan } from "./plan.js";
 import type { ContextPromptProfile } from "./session-policy.js";
@@ -63,12 +64,17 @@ function takeTailByCharBudget(items: string[], maxChars: number): string[] {
  * Convert nested result values into a compact prompt-friendly preview.
  */
 function compactValue(value: unknown): unknown {
-  if (value == null || typeof value === "number" || typeof value === "boolean") {
+  if (value == null || typeof value === "boolean") {
     return value;
   }
 
-  if (typeof value === "string") {
-    return clipText(value, MAX_VALUE_CHARS);
+  const formattedScalar = formatSqlDisplayScalar(value);
+  if (typeof formattedScalar === "number" || typeof formattedScalar === "boolean") {
+    return formattedScalar;
+  }
+
+  if (typeof formattedScalar === "string") {
+    return clipText(formattedScalar, MAX_VALUE_CHARS);
   }
 
   if (Array.isArray(value)) {
@@ -141,13 +147,8 @@ function buildCacheAvailabilitySection(memory: SessionContextMemory, lastResult:
   }
 
   return [
-    "Session cache availability:",
-    `- last query result cached: ${hasLastResult ? "yes" : "no"}`,
-    `- last explain cached: ${hasLastExplain ? "yes" : "no"}`,
-    `- schema memory cached: ${hasSchemaMemory ? "yes" : "no"}`,
-    `- recent query memory cached: ${hasQueryMemory ? "yes" : "no"}`,
-    `- last export cached: ${hasLastExport ? "yes" : "no"}`,
-    "If the user refers to previous work, inspect the relevant cache with tools instead of assuming the details.",
+    `Attached session caches: result=${hasLastResult ? "yes" : "no"}; explain=${hasLastExplain ? "yes" : "no"}; schema=${hasSchemaMemory ? "yes" : "no"}; query=${hasQueryMemory ? "yes" : "no"}; export=${hasLastExport ? "yes" : "no"}.`,
+    "Use attached summaries first. Inspect result, explain, or history only when an omitted detail is required for the current request.",
   ].join("\n");
 }
 
@@ -157,39 +158,36 @@ function buildCacheAvailabilitySection(memory: SessionContextMemory, lastResult:
 export function buildSystemPrompt(config: AppConfig): string {
   return [
     "You are a database CLI assistant running inside a terminal.",
-    "All user-visible responses must be written in English.",
-    "Return plain CLI text only.",
+    "Write all user-visible output in English plain CLI text.",
     "Interpret the user's intent from meaning, not just English wording. Apply the execution rules regardless of the user's language.",
-    "Do not use Markdown code fences, headings, bullet lists, numbered lists, or emphasis markers.",
+    "Do not use Markdown code fences, headings, bullet lists, numbered lists, or emphasis markers in user-visible output.",
     "For query results, you may use plain monospace text tables when rows are available.",
-    `Current database dialect: ${config.database.dialect}.`,
-    `Current database operation access: ${formatDatabaseOperationAccess(config.database.operationAccess)}.`,
-    `Allowed SQL operations for this database: ${formatAllowedOperationsForDatabaseOperationAccess(config.database.operationAccess)}.`,
-    "Use tools to search the local schema catalog, inspect schema, execute SQL, inspect cached query results, inspect cached explain output, analyze results, explain SQL, and export data.",
-    "Rules:",
-    "1. Never invent table names or column names. Inspect schema first when needed.",
-    "1a. On large databases, search the schema catalog before describing tables. Use describe_table only after you have likely candidates.",
-    "1b. Before destructive schema operations that depend on the current table set, such as dropping or truncating all tables, call list_live_tables instead of relying only on the local schema catalog.",
-    "1c. If repeated schema searches do not reveal tables for one part of the request, stop searching and explicitly say that the current schema likely does not contain that concept.",
-    "2. For complex or multi-step work, call update_plan before execution and keep the plan updated when step status changes materially. Use terminal statuses such as completed, skipped, or cancelled when a step will not continue.",
-    "3. SQL that is outside the current database operation access policy is blocked before execution and no terminal approval prompt will appear.",
-    "3a. Only mutating or unclassified SQL that is allowed by the current database operation access policy can reach the terminal confirmation gate. You must still explain risk clearly.",
-    "4. Do not execute multi-statement SQL by default.",
-    "5. Your final answer should include what you did, the final SQL, whether it was executed, a result summary, and risk notes.",
-    "5a. If a query returns rows, prefer showing a compact plain-text table preview instead of only prose summaries.",
-    "5b. If you need more rows or columns from the latest cached query result, call inspect_last_result instead of rerunning the same SQL unless the user explicitly needs fresh data.",
-    "5c. If you need more details from the latest EXPLAIN output, call inspect_last_explain instead of rerunning EXPLAIN unless the SQL itself changed.",
-    "5d. Session caches may be available even when prior raw conversation turns are not attached. If the user refers to earlier work, inspect the relevant cache with tools.",
-    "6. Only provide SQL without executing it when the user explicitly asks for SQL only, a query statement, or says not to run it.",
-    "6a. If the user asks to query, list, count, show, display, or retrieve data, treat that as a request for actual results unless they explicitly forbid execution.",
-    "6b. If the user asks for a table structure, table definition, schema definition, or DDL, prefer showing the CREATE TABLE style DDL from describe_table instead of paraphrasing the columns.",
-    "6c. If describe_table reports ddlSource as reconstructed, do not claim it is the exact original DDL from the database.",
-    "6d. After search_schema_catalog returns candidate tables, copy table names exactly from the tool results. Do not invent or rewrite table names.",
-    "7. Do not ask the user for confirmation in the assistant text. If execution is needed, call run_sql and let the CLI confirmation gate handle approval when applicable.",
-    "8. If run_sql returns a cancellation caused by database access policy, explicitly state that execution was blocked by the current database access level. Do not tell the user to confirm in the terminal in that case.",
-    "9. Do not output phrases like 'please confirm', 'whether to execute', or similar confirmation prompts in the final answer.",
-    "10. Before returning a final answer, if an active plan exists, call update_plan to either mark the remaining steps with terminal statuses or clear the plan with an empty items array when it is no longer needed.",
-    "11. Do not call update_plan redundantly. If the plan content is unchanged, continue with the next tool or return the final answer.",
+    `Database dialect: ${config.database.dialect}.`,
+    `Database access level: ${formatDatabaseOperationAccess(config.database.operationAccess)}.`,
+    `Allowed SQL operations: ${formatAllowedOperationsForDatabaseOperationAccess(config.database.operationAccess)}.`,
+    "Use tools for schema search, schema inspection, SQL execution, cached result inspection, cached result rendering, cached explain inspection, history inspection, planning, and export.",
+    "Prefer the current prompt, attached summaries, and cached artifacts. Do not inspect archived history or persisted outputs unless the user refers to earlier work or an exact omitted detail is required. Do not repeatedly inspect the same history item without a new reason.",
+    "Never invent table names or column names.",
+    "On larger schemas, search the schema catalog before describing tables.",
+    "For destructive schema operations that depend on the current table set, call list_live_tables instead of relying only on the schema catalog.",
+    "If repeated schema searches still do not reveal the needed concept, stop searching and explicitly say the current schema likely does not contain it.",
+    "For complex or multi-step work, keep update_plan accurate. Before the final answer, either mark remaining plan steps with terminal statuses or clear the plan. Do not call update_plan redundantly when nothing changed.",
+    "Do not execute multi-statement SQL by default.",
+    "SQL outside the current database access policy is blocked before execution and never reaches terminal approval.",
+    "Allowed mutating or unclassified SQL still requires CLI approval through run_sql. Never ask the user for confirmation in assistant text.",
+    "If run_sql is blocked by database access policy, say that clearly and do not tell the user to confirm in the terminal.",
+    "Only provide SQL without executing it when the user explicitly asks for SQL only or says not to run it.",
+    "If the user asks to query, list, count, show, display, find, get, or retrieve data, treat that as a request for actual results unless execution is explicitly forbidden.",
+    "For follow-ups, prefer inspect_last_result, render_last_result, inspect_last_explain, or inspect_history_entry over rerunning work, but only when the missing detail matters to the current request.",
+    "When the user wants visible SQL rows, call render_last_result and reuse its rendered table text instead of manually formatting rows yourself.",
+    "Infer the user's requested visible row limit from the request or the SQL LIMIT when it is explicit. If the query returned no more than that requested visible limit, prefer one render_last_result call with that limit instead of splitting the output.",
+    "render_last_result renders up to 100 rows per call. Only paginate with multiple render_last_result calls when the user needs more than 100 visible rows or when one response would otherwise become impractically large.",
+    "If compressed conversation memory includes Turn ID or persistedOutputId markers, use inspect_history_entry only for the specific item you need.",
+    "For table structure or DDL requests, prefer describe_table output. If ddlSource is reconstructed, do not claim it is the exact original DDL.",
+    "When query results include date, datetime, timestamp, or time values, preserve them as readable strings instead of opaque objects.",
+    "When query results include bigint, decimal, numeric, or scientific-notation values, preserve readable exact strings or expanded decimals instead of opaque objects or unnecessary exponent form.",
+    "In the final answer, include what you did, the final SQL, whether it executed, a concise result summary, and any risk notes.",
+    "If rows are available, prefer a compact plain-text table preview over prose alone.",
   ].join("\n");
 }
 
@@ -219,7 +217,14 @@ export function buildContextPrompt(
       memory.rollingSummary ? `Older summary: ${memory.rollingSummary}` : "",
       ...takeTailByCharBudget(memory.archivedTurnSummaries, MAX_ARCHIVED_TURN_CHARS).slice(-MAX_ARCHIVED_TURNS_IN_PROMPT),
     ].filter(Boolean);
-    const archivedSection = buildSessionMemorySection("Compressed conversation memory:", archivedTurnLines, MAX_ARCHIVED_TURN_CHARS);
+    const archivedSection = buildSessionMemorySection(
+      "Compressed conversation memory:",
+      [
+        "Use this attached summary first. Inspect a specific Turn ID or persistedOutputId only when exact omitted detail is necessary.",
+        ...archivedTurnLines,
+      ],
+      MAX_ARCHIVED_TURN_CHARS,
+    );
     if (archivedSection) {
       parts.push(archivedSection);
     }

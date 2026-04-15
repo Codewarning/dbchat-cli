@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import { createRequire } from "node:module";
 import {
   handleAskCommand,
   handleCatalogSearchCommand,
@@ -21,6 +22,9 @@ import {
 } from "./handlers.js";
 import { handleInitCommand } from "./init.js";
 
+const require = createRequire(import.meta.url);
+const packageJson = require("../../package.json") as { version: string };
+
 /**
  * Register all CLI commands exposed by the project.
  */
@@ -28,7 +32,7 @@ export function registerCommands(program: Command): void {
   program
     .name("dbchat")
     .description("A database-focused natural-language CLI assistant")
-    .version("0.1.0");
+    .version(packageJson.version);
 
   program.command("init").description("Initialize local configuration").action(() => handleInitCommand());
 

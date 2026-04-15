@@ -1,3 +1,5 @@
+import { formatSqlDisplayScalar } from "./value-format.js";
+
 type TableRow = Record<string, unknown>;
 
 const MAX_CELL_WIDTH = 36;
@@ -21,12 +23,17 @@ function formatCell(value: unknown): string {
     return "";
   }
 
-  if (typeof value === "string") {
-    return clipCell(value.replace(/\s+/g, " ").trim());
+  const formattedScalar = formatSqlDisplayScalar(value);
+  if (typeof formattedScalar === "string") {
+    return clipCell(formattedScalar.replace(/\s+/g, " ").trim());
   }
 
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
+  if (typeof formattedScalar === "number" || typeof formattedScalar === "boolean") {
+    return String(formattedScalar);
+  }
+
+  if (typeof value === "string") {
+    return clipCell(value.replace(/\s+/g, " ").trim());
   }
 
   if (Array.isArray(value)) {

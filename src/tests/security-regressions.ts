@@ -34,7 +34,7 @@ export async function registerSecurityRegressionTests(runTest: RunTest): Promise
     }
   });
 
-  await runTest("schema catalog refresh can be skipped when remote data transfer is not approved", async () => {
+  await runTest("schema-changing SQL marks the local catalog as manually refreshable instead of auto-refreshing it", async () => {
     let inspectedLiveSchema = false;
     const config = createTestConfig();
     const ioMessages: string[] = [];
@@ -57,12 +57,12 @@ export async function registerSecurityRegressionTests(runTest: RunTest): Promise
       io,
       "create table users(id int)",
       "CREATE",
-      false,
+      true,
     );
 
-    assert.equal(outcome.status, "skipped");
-    assert.match(outcome.reason, /not approved/i);
+    assert.equal(outcome.status, "manual_required");
+    assert.match(outcome.reason, /run `dbchat catalog sync` manually/i);
     assert.equal(inspectedLiveSchema, false);
-    assert.match(ioMessages.join("\n"), /refresh skipped/i);
+    assert.match(ioMessages.join("\n"), /automatic schema catalog refresh is disabled/i);
   });
 }

@@ -5,6 +5,7 @@ import type {
   TableColumn,
 } from "../types/index.js";
 import { formatRecordsTable } from "../ui/text-table.js";
+import { formatSqlDisplayScalar } from "../ui/value-format.js";
 
 const MAX_TABLE_PREVIEW_CHARS = 1800;
 const MAX_COLUMN_PREVIEW_CHARS = 1800;
@@ -99,12 +100,17 @@ export function takeItemsByCharBudget(items: string[], maxChars: number): { item
  * Recursively shrink nested values into a smaller prompt-friendly representation.
  */
 export function compactValue(value: unknown, depth = 0): unknown {
-  if (value == null || typeof value === "number" || typeof value === "boolean") {
+  if (value == null || typeof value === "boolean") {
     return value;
   }
 
-  if (typeof value === "string") {
-    return clipText(value, 120);
+  const formattedScalar = formatSqlDisplayScalar(value);
+  if (typeof formattedScalar === "number" || typeof formattedScalar === "boolean") {
+    return formattedScalar;
+  }
+
+  if (typeof formattedScalar === "string") {
+    return clipText(formattedScalar, 120);
   }
 
   if (Array.isArray(value)) {

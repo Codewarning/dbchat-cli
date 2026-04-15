@@ -3,7 +3,11 @@ import { ensureUniqueHostAddress, orderDatabaseNamesForSelection } from "../comm
 import { updateEmbeddingConfigInMemory } from "../commands/embedding-config.js";
 import { promptEmbeddingConfig } from "../commands/embedding-config-helpers.js";
 import { findDatabaseHostByConnection, persistNormalizedDatabaseSelectionForConnection } from "../config/database-hosts.js";
-import { DEFAULT_ALIYUN_EMBEDDING_BASE_URL, DEFAULT_ALIYUN_EMBEDDING_MODEL } from "../config/defaults.js";
+import {
+  DEFAULT_ALIYUN_EMBEDDING_BASE_URL,
+  DEFAULT_ALIYUN_EMBEDDING_MODEL,
+  DEFAULT_CONTEXT_COMPRESSION_CONFIG,
+} from "../config/defaults.js";
 import { storedConfigSchema } from "../config/schema.js";
 import { buildResolvedAppConfig } from "../config/store.js";
 import { embedTexts } from "../embedding/client.js";
@@ -157,6 +161,11 @@ export async function registerConfigAndEmbeddingTests(runTest: RunTest): Promise
         DBCHAT_DB_SSL: "true",
         DBCHAT_RESULT_ROW_LIMIT: "500",
         DBCHAT_PREVIEW_ROW_LIMIT: "25",
+        DBCHAT_CONTEXT_RECENT_RAW_TURNS: "4",
+        DBCHAT_CONTEXT_RAW_HISTORY_CHARS: "9000",
+        DBCHAT_CONTEXT_LARGE_TOOL_OUTPUT_CHARS: "3100",
+        DBCHAT_CONTEXT_PERSISTED_TOOL_PREVIEW_CHARS: "1500",
+        DBCHAT_CONTEXT_MAX_TOOL_CALLS_PER_TURN: "9",
       },
     );
 
@@ -173,6 +182,56 @@ export async function registerConfigAndEmbeddingTests(runTest: RunTest): Promise
     assert.equal(config.database.ssl, true);
     assert.equal(config.app.resultRowLimit, 500);
     assert.equal(config.app.previewRowLimit, 25);
+    assert.equal(config.app.contextCompression.recentRawTurns, 4);
+    assert.equal(config.app.contextCompression.rawHistoryChars, 9000);
+    assert.equal(config.app.contextCompression.largeToolOutputChars, 3100);
+    assert.equal(config.app.contextCompression.persistedToolPreviewChars, 1500);
+    assert.equal(config.app.contextCompression.maxToolCallsPerTurn, 9);
+  });
+
+  await runTest("invalid numeric environment overrides are ignored instead of aborting config resolution", () => {
+    const config = buildResolvedAppConfig(
+      {
+        databaseHosts: [
+          {
+            name: "local",
+            dialect: "postgres",
+            host: "stored-host",
+            port: 5432,
+            username: "stored-user",
+            password: "stored-pass",
+            ssl: false,
+            databases: [{ name: "stored-db", schema: "public" }],
+          },
+        ],
+        activeDatabaseHost: "local",
+        activeDatabaseName: "stored-db",
+        app: {
+          resultRowLimit: 200,
+          previewRowLimit: 20,
+          contextCompression: {
+            recentRawTurns: 2,
+            rawHistoryChars: 7000,
+            largeToolOutputChars: 2400,
+            persistedToolPreviewChars: 1200,
+            maxToolCallsPerTurn: 12,
+          },
+        },
+      },
+      {
+        DBCHAT_DB_PORT: "-1",
+        DBCHAT_RESULT_ROW_LIMIT: "-5",
+        DBCHAT_PREVIEW_ROW_LIMIT: "0",
+        DBCHAT_CONTEXT_RECENT_RAW_TURNS: "1.5",
+        DBCHAT_CONTEXT_MAX_TOOL_CALLS_PER_TURN: "NaN",
+      },
+    );
+
+    assert.equal(config.database.port, 5432);
+    assert.equal(config.app.resultRowLimit, 200);
+    assert.equal(config.app.previewRowLimit, 20);
+    assert.equal(config.app.contextCompression.recentRawTurns, 2);
+    assert.equal(config.app.contextCompression.maxToolCallsPerTurn, 12);
   });
 
   await runTest("default embedding config uses the Aliyun preset", () => {
@@ -200,6 +259,19 @@ export async function registerConfigAndEmbeddingTests(runTest: RunTest): Promise
     assert.equal(config.embedding.baseUrl, DEFAULT_ALIYUN_EMBEDDING_BASE_URL);
     assert.equal(config.embedding.model, DEFAULT_ALIYUN_EMBEDDING_MODEL);
     assert.equal(config.embedding.apiKey, "");
+    assert.deepEqual(config.app.contextCompression, DEFAULT_CONTEXT_COMPRESSION_CONFIG);
+  });
+
+  await runTest("stored app config accepts partial context compression overrides", () => {
+    const parsed = storedConfigSchema.parse({
+      app: {
+        contextCompression: {
+          maxToolCallsPerTurn: 7,
+        },
+      },
+    });
+
+    assert.equal(parsed.app?.contextCompression?.maxToolCallsPerTurn, 7);
   });
 
   await runTest("embedding model identity is based on provider, base URL, and model", () => {

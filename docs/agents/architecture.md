@@ -44,8 +44,8 @@ Files:
 Responsibilities:
 
 - keep command handlers and LLM tools thin by centralizing repeated orchestration
-- share one SQL execution path for direct CLI SQL, tool-driven SQL, approval gating, and post-execution schema-catalog refresh
-- share one schema-catalog path for refresh, ensure-ready, and search flows
+- share one SQL execution path for direct CLI SQL, tool-driven SQL, approval gating, and post-execution schema-catalog staleness notices
+- share one schema-catalog path for initialization, manual refresh, and search flows
 
 ### 3. Agent Layer
 
@@ -62,6 +62,8 @@ Files:
 Responsibilities:
 
 - maintain compressed conversation memory plus a recent raw-turn window
+- keep older turns searchable by stable turn IDs even after they leave the raw prompt window
+- keep oversized tool payloads out of model-visible history by replacing them with persisted-output markers that can be inspected later on demand
 - maintain in-memory plan
 - maintain latest query result
 - keep request-intent heuristics, finer-grained request context classification, request-aware context packing, message assembly, and tool execution helpers separated so the session coordinator can stay focused on control flow
@@ -102,6 +104,7 @@ Responsibilities:
 - define the tool surface available to the model
 - validate and execute tool calls from a shared spec registry
 - summarize tool results before they are sent back into model-visible history
+- expose history inspection for archived turns and persisted oversized tool payloads
 - expose cached-result and cached-explain inspection so the model can fetch more detail on demand instead of carrying large previews forward
 - keep default SQL and EXPLAIN payloads tight enough that wide result sets and large plans do not dominate later turns
 - enforce confirmation gates
@@ -161,6 +164,7 @@ Files:
 Responsibilities:
 
 - config defaults and validation
+- runtime context-compression defaults and validation
 - stored multi-host database config normalization, runtime access defaults, and active target selection
 - export helpers
 - terminal prompt helpers

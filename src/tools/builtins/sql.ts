@@ -97,13 +97,9 @@ function serializeQueryResultForModel(
     : "";
   const truncationSummary = result.rowsTruncated ? ` Cached rows were limited to ${result.rows.length}.` : "";
   const catalogRefreshSummary =
-    catalogRefresh?.status === "refreshed"
-      ? " Schema catalog refreshed after the schema change."
-      : catalogRefresh?.status === "skipped"
-        ? " Schema catalog refresh was skipped because remote data transfer was not approved."
-      : catalogRefresh?.status === "failed"
-        ? ` Schema catalog refresh failed: ${catalogRefresh.error ?? "unknown error"}.`
-        : "";
+    catalogRefresh?.status === "manual_required"
+      ? " Schema catalog was not refreshed automatically after the schema change. Run `dbchat catalog sync` manually before relying on schema search results."
+      : "";
   return {
     content: stringifyCompact(payload),
     summary: `SQL ${payload.status}: ${payload.operation} returned ${payload.rowCount} rows in ${payload.elapsedMs.toFixed(2)}ms.${fieldSummary}${truncationSummary}${catalogRefreshSummary}`,
@@ -200,7 +196,7 @@ export const runSqlTool = defineTool(
     }
 
     const result = execution.result;
-    if (execution.catalogRefresh.status === "refreshed") {
+    if (execution.catalogRefresh.status === "manual_required") {
       context.schemaCatalogCache = null;
     }
     context.setLastResult(result);

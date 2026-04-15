@@ -1,6 +1,6 @@
 import type { DatabaseAdapter } from "../db/adapter.js";
 import { ensureSingleStatement } from "../db/safety.js";
-import { refreshSchemaCatalogAfterSqlIfNeeded, shouldRefreshSchemaCatalogAfterSql, type SchemaCatalogRefreshOutcome } from "../schema/catalog.js";
+import { refreshSchemaCatalogAfterSqlIfNeeded, type SchemaCatalogRefreshOutcome } from "../schema/catalog.js";
 import { executeSqlStatement, type ExecuteSqlStatementOptions, type SqlExecutionCancelled, type SqlExecutionSuccess } from "../sql/execution.js";
 import type { AgentIO, AppConfig, MutationApprovalState, QueryPlanResult } from "../types/index.js";
 
@@ -10,7 +10,6 @@ export interface ExecuteManagedSqlOptions {
   io: AgentIO;
   sql: string;
   approvalState?: MutationApprovalState;
-  confirmSchemaCatalogRefresh?: () => Promise<boolean>;
 }
 
 export interface ManagedSqlExecutionSuccess extends SqlExecutionSuccess {
@@ -31,17 +30,13 @@ function buildSqlExecutionOptions(options: ExecuteManagedSqlOptions): ExecuteSql
 }
 
 /**
- * Execute one SQL statement through the shared safety gate and then refresh the schema catalog when needed.
+ * Execute one SQL statement through the shared safety gate and then report whether manual schema-catalog refresh is needed.
  */
 export async function executeManagedSql(options: ExecuteManagedSqlOptions): Promise<ManagedSqlExecutionOutcome> {
   const execution = await executeSqlStatement(buildSqlExecutionOptions(options));
   if (execution.status === "cancelled") {
     return execution;
   }
-
-  const schemaRefreshNeeded = shouldRefreshSchemaCatalogAfterSql(options.sql, execution.safety.operation);
-  const allowSchemaCatalogRefresh =
-    schemaRefreshNeeded && options.confirmSchemaCatalogRefresh ? await options.confirmSchemaCatalogRefresh() : true;
 
   return {
     ...execution,
@@ -51,7 +46,6 @@ export async function executeManagedSql(options: ExecuteManagedSqlOptions): Prom
       options.io,
       options.sql,
       execution.safety.operation,
-      allowSchemaCatalogRefresh,
     ),
   };
 }

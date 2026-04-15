@@ -57,9 +57,24 @@ export const storedDatabaseHostSchema = z.object({
   databases: z.array(storedDatabaseEntrySchema),
 });
 
+export const contextCompressionConfigSchema = z.object({
+  recentRawTurns: z.number().int().positive(),
+  rawHistoryChars: z.number().int().positive(),
+  largeToolOutputChars: z.number().int().positive(),
+  persistedToolPreviewChars: z.number().int().positive(),
+  maxToolCallsPerTurn: z.number().int().positive(),
+});
+
 export const appRuntimeConfigSchema = z.object({
   resultRowLimit: z.number().int().positive(),
   previewRowLimit: z.number().int().positive(),
+  contextCompression: contextCompressionConfigSchema,
+});
+
+export const storedAppRuntimeConfigSchema = z.object({
+  resultRowLimit: z.number().int().positive().optional(),
+  previewRowLimit: z.number().int().positive().optional(),
+  contextCompression: contextCompressionConfigSchema.partial().optional(),
 });
 
 export const storedConfigSchema = z.object({
@@ -68,7 +83,7 @@ export const storedConfigSchema = z.object({
   databaseHosts: z.array(storedDatabaseHostSchema).optional(),
   activeDatabaseHost: z.string().min(1).optional(),
   activeDatabaseName: z.string().min(1).optional(),
-  app: appRuntimeConfigSchema.partial().optional(),
+  app: storedAppRuntimeConfigSchema.optional(),
 });
 
 export const appConfigSchema = z.object({

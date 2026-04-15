@@ -109,6 +109,9 @@ Configuration is stored in:
 ~/.db-chat-cli/config.json
 ```
 
+Advanced session context controls live under `app.contextCompression` in that config file.
+They are optional and default to conservative values, so existing installs keep working without migration.
+
 When an embedding-backed workflow first needs it, the CLI ensures a local GGUF embedding model exists under:
 
 ```text
@@ -142,9 +145,10 @@ Unchanged tables reuse the existing semantic index, and the index powers fast ta
 `dbchat catalog sync` therefore now depends on a working LLM configuration, the local embedding model, and database connectivity.
 The catalog is stored locally under `~/.db-chat-cli/schema-catalog/` in nested directories grouped by dialect, host-port, and database, with one JSON file per schema target.
 The on-disk directory name remains `~/.db-chat-cli/` for compatibility with existing local installs.
-`ask` and `chat` no longer force a schema-catalog refresh before the session starts.
-The catalog is checked lazily when a schema-catalog tool is actually used, and only then rebuilt if it is missing, stale, or incompatible with the current embedding model.
-Before `ask`, `chat`, `catalog sync`, or `catalog search` send database-derived data to remote LLM or embedding APIs, the CLI now asks for explicit confirmation.
+When `ask`, `chat`, or a live database switch enters a database target, the CLI reuses the existing compatible local schema catalog when it is already present.
+If the catalog is missing or incompatible with the current embedding model, the CLI can initialize it at database-entry time after explicit approval for the required remote metadata transfer.
+After database entry, schema-catalog tools reuse the existing local catalog and do not refresh it automatically on later tool calls.
+`catalog sync` remains the manual refresh command, and `catalog search` still asks for confirmation before it sends search text to the remote embedding API.
 
 ## Environment Variables
 
@@ -161,6 +165,11 @@ You can also override settings via environment variables:
 - `EMBEDDING_MODEL_URL`
 - `DBCHAT_RESULT_ROW_LIMIT`
 - `DBCHAT_PREVIEW_ROW_LIMIT`
+- `DBCHAT_CONTEXT_RECENT_RAW_TURNS`
+- `DBCHAT_CONTEXT_RAW_HISTORY_CHARS`
+- `DBCHAT_CONTEXT_LARGE_TOOL_OUTPUT_CHARS`
+- `DBCHAT_CONTEXT_PERSISTED_TOOL_PREVIEW_CHARS`
+- `DBCHAT_CONTEXT_MAX_TOOL_CALLS_PER_TURN`
 - `DBCHAT_DB_DIALECT`
 - `DBCHAT_DB_HOST`
 - `DBCHAT_DB_PORT`
@@ -179,7 +188,6 @@ node dist/index.js chat
 ```
 
 The interactive chat session stays open after each LLM reply. It only exits when you enter `/exit` or terminate the process yourself.
-Before the session starts, the CLI asks for confirmation because chat mode can send prompts, schema metadata, executed SQL text, and bounded result previews to the configured remote APIs.
 When `chat` runs in a TTY terminal, it now uses a React Ink interface with:
 
 - an initial Codex-style welcome splash at the top of the transcript, with later chat appended below it
@@ -209,8 +217,6 @@ node dist/index.js ask "Show the order volume trend for the last 7 days"
 node dist/index.js ask "Analyze this SQL for performance and suggest improvements"
 ```
 
-Before the request is sent, the CLI asks for confirmation because `ask` can send prompts, schema metadata, executed SQL text, and bounded result previews to the configured remote APIs.
-
 ### Execute SQL Directly
 
 ```bash
@@ -220,7 +226,7 @@ node dist/index.js sql "select * from users limit 10"
 Read-only SQL executes immediately.
 DML, DDL, and unclassified SQL that are allowed by the active database access level require approval with three choices: `Approve Once`, `Approve All For Turn`, or `Reject`.
 If the current database access level does not allow the statement, the CLI rejects it before opening the approval prompt.
-If a successful statement changes tracked table structure, such as `CREATE TABLE`, `ALTER TABLE`, `DROP TABLE`, or `RENAME TABLE`, the CLI refreshes the local schema catalog after execution only when you approve the required remote metadata transfer. Otherwise it skips the refresh and keeps the original SQL success result.
+If a successful statement changes tracked table structure, such as `CREATE TABLE`, `ALTER TABLE`, `DROP TABLE`, or `RENAME TABLE`, the CLI keeps the SQL success result and tells you to run `dbchat catalog sync` manually before relying on updated schema-catalog search results.
 
 ### Show an Execution Plan
 
@@ -250,6 +256,7 @@ node dist/index.js catalog search "order items"
 ```
 
 Both commands now ask for confirmation before they send schema metadata or search text to the configured remote APIs.
+`catalog sync` is also the manual way to rebuild the local schema catalog after schema-changing SQL.
 
 ### Show Current Configuration
 
@@ -398,11 +405,15 @@ Typing `@` opens the live database picker for the current host. Use Up/Down to c
 - Statements outside the active database access level are blocked before the approval gate.
 - Allowed DML, DDL, and unclassified SQL go through an explicit approval gate with `Approve Once`, `Approve All For Turn`, and `Reject`.
 - Only a single SQL statement can be executed at a time.
-- The CLI now loads or rebuilds the local schema catalog lazily when a schema-catalog tool needs it, instead of forcing that work before every `ask` or `chat` session.
+- The CLI now initializes the local schema catalog only when a database target is entered, reuses the stored snapshot afterward, and leaves later refreshes to the explicit `catalog sync` command.
 - The model can search the local schema catalog before loading a specific table definition.
 - For destructive schema operations that depend on the current table set, the model can verify live table names directly from the active database connection instead of relying only on the local schema catalog.
 - Query results can be exported to `JSON` or `CSV`.
 - `app.resultRowLimit` limits how many rows stay cached in memory after a query, and exports of the last result operate on that cached slice.
+- `app.contextCompression.recentRawTurns` controls how many full recent turns stay in raw prompt history before older turns are archived into summaries.
+- `app.contextCompression.rawHistoryChars` caps the raw-history character budget that can be packed into one LLM request.
+- Tool results that exceed `app.contextCompression.largeToolOutputChars` are no longer inlined into model-visible history. The session stores the full payload out of band, leaves behind a compact marker with `persistedOutputId`, and the model can fetch the omitted content later through `inspect_history_entry`.
+- `app.contextCompression.maxToolCallsPerTurn` caps how many tool calls one user turn may execute before the model is forced to conclude with the information already gathered.
 - Database drivers are loaded lazily so that non-database commands can start without unnecessary driver initialization.
 - The CLI supports both OpenAI-compatible tool calling and Anthropic tool calling.
 - Database config supports multiple host configs and multiple database names under each host, with active host/database switching through CLI commands and live database discovery during `use-database`.
@@ -412,6 +423,7 @@ Typing `@` opens the live database picker for the current host. Use Up/Down to c
 - Older archived turns now keep user request, key outcomes, and final conclusion ahead of raw tool traces, so long chats preserve higher-value context in less space.
 - The latest cached query result and latest cached EXPLAIN output can be re-inspected through dedicated tools, so follow-up turns do not need to keep carrying large previews by default.
 - Tool results sent back to the model are compact payloads rather than full raw JSON results, with wide SQL results and large EXPLAIN outputs trimmed by default because the cache-inspection tools can fetch more detail on demand.
+- When one tool payload is still too large for normal turn history, the model now receives a compact persisted-output marker and can later inspect the archived full payload or a historical turn by calling `inspect_history_entry`.
 
 ## Next Steps
 

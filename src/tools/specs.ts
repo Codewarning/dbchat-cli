@@ -5,8 +5,10 @@ import type {
   AgentIO,
   AppConfig,
   AppRuntimeConfig,
+  HistoryTurnSnapshot,
   MutationApprovalState,
   PlanItem,
+  PersistedToolOutputSnapshot,
   QueryPlanResult,
   QueryExecutionResult,
   SchemaCatalog,
@@ -18,6 +20,14 @@ import type {
 export interface SerializedToolResult {
   content: string;
   summary: string;
+}
+
+/**
+ * Narrow history inspection interface exposed to tools.
+ */
+export interface ToolHistoryInspector {
+  inspectTurn(turnId: string): HistoryTurnSnapshot | null;
+  inspectPersistedOutput(id: string): PersistedToolOutputSnapshot | null;
 }
 
 /**
@@ -34,6 +44,7 @@ export interface ToolRuntimeContext {
   setLastResult(result: QueryExecutionResult | null): void;
   getLastExplain(): QueryPlanResult | null;
   setLastExplain(result: QueryPlanResult | null): void;
+  history: ToolHistoryInspector;
   mutationApproval: MutationApprovalState;
 }
 

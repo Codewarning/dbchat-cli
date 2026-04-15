@@ -87,9 +87,21 @@ export interface StoredDatabaseHost {
 /**
  * App-level runtime limits that influence result caching and previews.
  */
+export interface ContextCompressionConfig {
+  recentRawTurns: number;
+  rawHistoryChars: number;
+  largeToolOutputChars: number;
+  persistedToolPreviewChars: number;
+  maxToolCallsPerTurn: number;
+}
+
+/**
+ * App-level runtime limits that influence result caching, previews, and context packing.
+ */
 export interface AppRuntimeConfig {
   resultRowLimit: number;
   previewRowLimit: number;
+  contextCompression: ContextCompressionConfig;
 }
 
 /**
@@ -111,7 +123,11 @@ export interface StoredConfig {
   databaseHosts?: StoredDatabaseHost[];
   activeDatabaseHost?: string;
   activeDatabaseName?: string;
-  app?: Partial<AppRuntimeConfig>;
+  app?: {
+    resultRowLimit?: number;
+    previewRowLimit?: number;
+    contextCompression?: Partial<ContextCompressionConfig>;
+  };
 }
 
 /**
@@ -284,6 +300,37 @@ export interface ExportResult {
   outputPath: string;
   rowCount: number;
   truncated: boolean;
+}
+
+/**
+ * One serialized message exposed to history-inspection tools without leaking session internals.
+ */
+export interface HistoryMessageSnapshot {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string | null;
+  toolCallId?: string;
+  isError?: boolean;
+  toolCallNames?: string[];
+}
+
+/**
+ * One completed conversation turn exposed through the history-inspection interface.
+ */
+export interface HistoryTurnSnapshot {
+  turnId: string;
+  summaryLines: string[];
+  messages: HistoryMessageSnapshot[];
+}
+
+/**
+ * One persisted oversized tool payload exposed through the history-inspection interface.
+ */
+export interface PersistedToolOutputSnapshot {
+  persistedOutputId: string;
+  turnId: string;
+  toolName: string;
+  summary: string;
+  content: string;
 }
 
 export type ProgressUnit = "bytes";

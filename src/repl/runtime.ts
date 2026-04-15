@@ -5,6 +5,7 @@ import { DEFAULT_DATABASE_OPERATION_ACCESS } from "../db/operation-access.js";
 import { formatDatabaseOperationAccess } from "../db/operation-access.js";
 import type { DatabaseAdapter } from "../db/adapter.js";
 import { createDatabaseAdapter } from "../db/factory.js";
+import { initializeLocalSchemaCatalogOnEntry } from "../services/schema-catalog.js";
 import type { AgentIO, AppConfig, DatabaseConfig, DatabaseOperationAccess } from "../types/index.js";
 import type { DatabaseConfigCommandOutcome } from "../commands/database-config.js";
 
@@ -178,6 +179,8 @@ async function activateRuntimeTarget(
   } else {
     state.session = new AgentSession(nextConfig, nextDb, chatIo);
   }
+
+  await initializeLocalSchemaCatalogOnEntry(nextConfig, nextDb, chatIo);
 
   return {
     runtimeChanged: true,

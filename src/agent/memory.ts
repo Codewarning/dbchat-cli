@@ -4,8 +4,21 @@ import type { LlmMessageParam, LlmToolCall } from "../llm/types.js";
  * One user turn plus the raw messages and summary lines collected during execution.
  */
 export interface ConversationTurn {
+  id: string;
   messages: LlmMessageParam[];
   summaryLines: string[];
+}
+
+/**
+ * One large tool payload kept out of active prompt history but still available for later inspection.
+ */
+export interface PersistedToolOutput {
+  id: string;
+  turnId: string;
+  toolCallId: string;
+  toolName: string;
+  summary: string;
+  content: string;
 }
 
 /**
@@ -29,9 +42,7 @@ export interface SessionContextMemory {
   lastExportSummary: string | null;
 }
 
-export const MAX_RECENT_RAW_TURNS = 2;
 export const MAX_ARCHIVED_TURN_SUMMARIES = 6;
-export const MAX_RAW_HISTORY_CHARS = 7000;
 
 const MAX_ROLLING_SUMMARY_CHARS = 2400;
 const MAX_TURN_SUMMARY_CHARS = 480;
@@ -79,15 +90,16 @@ export function clipMiddle(value: string, maxChars: number): string {
 /**
  * Start a new conversation turn seeded with the user's raw request.
  */
-export function createConversationTurn(input: string): ConversationTurn {
+export function createConversationTurn(input: string, turnId = "turn-0"): ConversationTurn {
   return {
+    id: turnId,
     messages: [
       {
         role: "user",
         content: input,
       },
     ],
-    summaryLines: [`User request: ${clipText(input, 240)}`],
+    summaryLines: [`Turn ID: ${turnId}`, `User request: ${clipText(input, 240)}`],
   };
 }
 
@@ -157,11 +169,14 @@ function pushUniqueLine(lines: string[], line: string | undefined): void {
 
 function buildCondensedTurnSummaryLines(lines: string[]): string[] {
   const normalizedLines = lines.map((line) => line.trim()).filter(Boolean);
+  const turnIdLine = normalizedLines.find((line) => line.startsWith("Turn ID:"));
   const userRequest = normalizedLines.find((line) => line.startsWith("User request:"));
   const finalAnswer = [...normalizedLines].reverse().find((line) => line.startsWith("Final answer:"));
   const toolCallCount = normalizedLines.filter((line) => line.startsWith("Tool call:")).length;
+  const persistedToolOutputLines = normalizedLines.filter((line) => line.startsWith("Persisted tool output:"));
   const detailedOutcomeLines = normalizedLines.filter(
     (line) =>
+      !line.startsWith("Turn ID:") &&
       !line.startsWith("User request:") &&
       !line.startsWith("Final answer:") &&
       !line.startsWith("Tool call:") &&
@@ -169,7 +184,11 @@ function buildCondensedTurnSummaryLines(lines: string[]): string[] {
   );
   const selectedLines: string[] = [];
 
+  pushUniqueLine(selectedLines, turnIdLine);
   pushUniqueLine(selectedLines, userRequest);
+  for (const line of persistedToolOutputLines) {
+    pushUniqueLine(selectedLines, line);
+  }
   for (const line of detailedOutcomeLines.slice(-MAX_ARCHIVED_DETAIL_LINES)) {
     pushUniqueLine(selectedLines, line);
   }

@@ -14,7 +14,7 @@ Path:
 4. run SQL safety checks and classify the statement as read-only, DML, DDL, or unclassified
 5. if the statement is DML, DDL, or unclassified, ask for approval with `Approve Once`, `Approve All For Turn`, or `Reject`
 6. execute SQL through the matching runtime path
-7. if the executed SQL changed tracked table structure, ask for explicit approval before sending schema metadata to remote APIs for a catalog refresh, then refresh or skip the refresh accordingly
+7. if the executed SQL changed tracked table structure, keep the SQL success result and tell the user to run `dbchat catalog sync` manually before relying on updated schema-catalog search results
 8. print preview
 
 Key files:
@@ -32,19 +32,21 @@ Entry:
 Path:
 
 1. load config and db runtime
-2. ask for explicit approval before sending prompts or database-derived context to remote APIs
-3. create `AgentSession`
-4. start a new turn and preserve only a small recent raw-turn window
-5. classify the request into a rough context shape such as fresh query, fresh schema, fresh explain, or follow-up/export work
-6. build request-aware prompt context from only the relevant compressed memory blocks and a bounded raw-turn window
-7. call LLM
-8. if tools are requested, execute them through the shared tool spec registry
-9. lazily load or refresh the schema catalog only when a schema-catalog tool is actually used
+2. create `AgentSession`
+3. start a new turn and preserve only a small recent raw-turn window
+4. classify the request into a rough context shape such as fresh query, fresh schema, fresh explain, or follow-up/export work
+5. build request-aware prompt context from only the relevant compressed memory blocks and a bounded raw-turn window
+6. call LLM
+7. if tools are requested, execute them through the shared tool spec registry
+8. initialize the local schema catalog when the database runtime is entered if it is missing or embedding-incompatible, after explicit approval for the required remote metadata transfer
+9. reuse the stored local schema catalog on later schema-tool calls instead of refreshing it automatically
 10. search the semantic schema catalog before describing individual tables when possible
 11. before destructive schema operations that depend on current tables, verify the live table list from the active database connection instead of relying only on the local schema catalog
-12. append compact tool results and let the model inspect cached result or explain artifacts through `inspect_last_result` and `inspect_last_explain` when it needs more detail without rerunning work
-13. continue until the LLM returns a final answer, then archive older completed turns into compressed memory as needed
-14. clear the active plan when every plan step reaches a terminal status such as `completed`, `skipped`, or `cancelled`, so resolved plans do not bleed into the next turn
+12. append compact tool results and, when one payload is still too large for normal history, replace it with a persisted-output marker instead of inlining the full content
+13. let the model inspect cached result, explain, archived turn, or persisted-output artifacts through `inspect_last_result`, `inspect_last_explain`, and `inspect_history_entry` when it needs more detail without rerunning work
+14. continue until the LLM returns a final answer, then archive older completed turns into compressed memory according to the configured recent-raw-turn limit
+15. stop tool execution early when the configured per-turn tool-call cap is reached and force the model to conclude from the information already gathered
+16. clear the active plan when every plan step reaches a terminal status such as `completed`, `skipped`, or `cancelled`, so resolved plans do not bleed into the next turn
 
 Key files:
 
@@ -63,17 +65,18 @@ Entry:
 Path:
 
 1. start REPL
-2. ask for explicit approval before sending prompts or database-derived context to remote APIs
-3. keep a single `AgentSession`
-4. allow slash commands such as `/help`, `/schema`, `/plan`, `/clear`, `/host ...`, `/database ...`
-5. in the Ink REPL, show slash-command autocomplete suggestions while the user types `/...`
-6. in the Ink REPL, show an `@` live database picker for the current host while the user types `@...`
-7. when `/clear` runs, clear both the in-memory conversation state and the visible REPL screen
-8. route normal text into the same agent loop used by `ask`, with older turns compressed as the chat grows
-9. when the active database target changes inside the REPL, prompt for the runtime SQL access preset, reload the runtime adapter, preserve any saved schema for the selected database when known, persist that database as the next default selection for the stored host when possible, and clear the conversation state with a user-facing notice
-10. lazily load or refresh the schema catalog only when a schema-catalog tool is actually used
-11. clear the active plan when every plan step reaches a terminal status such as `completed`, `skipped`, or `cancelled`, so old resolved plans are not shown again on the next turn
-12. keep the session open until the user enters `/exit` or interrupts the process
+2. keep a single `AgentSession`
+3. allow slash commands such as `/help`, `/schema`, `/plan`, `/clear`, `/host ...`, `/database ...`
+4. in the Ink REPL, show slash-command autocomplete suggestions while the user types `/...`
+5. in the Ink REPL, show an `@` live database picker for the current host while the user types `@...`
+6. when `/clear` runs, clear both the in-memory conversation state and the visible REPL screen
+7. route normal text into the same agent loop used by `ask`, with older turns compressed as the chat grows
+8. when the active database target changes inside the REPL, prompt for the runtime SQL access preset, reload the runtime adapter, preserve any saved schema for the selected database when known, persist that database as the next default selection for the stored host when possible, and clear the conversation state with a user-facing notice
+9. initialize the local schema catalog when the current database target is entered if it is missing or embedding-incompatible, after explicit approval for the required remote metadata transfer
+10. reuse the stored local schema catalog on later schema-tool calls instead of refreshing it automatically
+11. keep oversized tool payloads out of normal chat history by persisting them behind markers and retrieving them on demand through `inspect_history_entry`
+12. clear the active plan when every plan step reaches a terminal status such as `completed`, `skipped`, or `cancelled`, so old resolved plans are not shown again on the next turn
+13. keep the session open until the user enters `/exit` or interrupts the process
 
 Key files:
 
@@ -89,7 +92,7 @@ Key files:
 Entry:
 
 - `dbchat catalog sync`
-- on-demand compatibility and freshness checks when a schema-catalog tool is actually used by `dbchat ask` or `dbchat chat`
+- database-entry-time initialization when `dbchat ask` or `dbchat chat` enters a target that has no compatible local catalog yet
 
 Path:
 

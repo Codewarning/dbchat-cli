@@ -1,14 +1,83 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import type { DatabaseAdapter } from "../db/adapter.js";
+import { createConversationTurn, createSessionContextMemory } from "../agent/memory.js";
+import { executeAgentToolCall } from "../agent/tool-execution.js";
+import { getEmbeddingModelInfo } from "../embedding/config.js";
 import { buildCreateTableDdl } from "../schema/table-ddl.js";
-import { assessSchemaCatalogFreshness } from "../schema/catalog.js";
+import { SCHEMA_CATALOG_VERSION } from "../schema/catalog-storage.js";
+import { assessSchemaCatalogFreshness, ensureSchemaCatalogReady, saveSchemaCatalog } from "../schema/catalog.js";
 import { executeTool } from "../tools/registry.js";
 import { serializeToolResultForModel } from "../tools/model-payload.js";
 import { formatSchemaSummaryText, formatTableSchemaText } from "../ui/text-formatters.js";
-import { RunTest, createDatabaseStub, createTestConfig, createToolRuntimeContext } from "./support.js";
+import { RunTest, createDatabaseStub, createTestConfig, createTestIo, createToolRuntimeContext } from "./support.js";
 
 export async function registerSchemaAndToolTests(runTest: RunTest): Promise<void> {
+  await runTest("schema catalog loading reuses the stored snapshot without live freshness checks", async () => {
+    const temporaryHome = await mkdtemp(path.join(os.tmpdir(), "dbchat-catalog-"));
+    const originalHome = process.env.HOME;
+    const originalUserProfile = process.env.USERPROFILE;
+    process.env.HOME = temporaryHome;
+    process.env.USERPROFILE = temporaryHome;
+
+    try {
+      const config = createTestConfig();
+      await saveSchemaCatalog(config.database, {
+        version: SCHEMA_CATALOG_VERSION,
+        dialect: config.database.dialect,
+        host: config.database.host,
+        port: config.database.port,
+        database: config.database.database,
+        schema: config.database.schema,
+        generatedAt: new Date().toISOString(),
+        tableCount: 1,
+        embeddingModelId: getEmbeddingModelInfo(config.embedding).modelId,
+        tables: [
+          {
+            tableName: "users",
+            schemaHash: "users-hash",
+            summaryText: "users table",
+            description: "Stores users.",
+            tags: ["users", "accounts", "profiles"],
+            embeddingText: "users",
+            embeddingVector: [0.1, 0.2],
+            columns: [{ name: "id", dataType: "integer", isNullable: false, defaultValue: null }],
+          },
+        ],
+      });
+
+      let liveSchemaCalls = 0;
+      const db: DatabaseAdapter = createDatabaseStub({
+        async getAllTableSchemas() {
+          liveSchemaCalls += 1;
+          throw new Error("should not inspect live schema");
+        },
+      });
+
+      const ready = await ensureSchemaCatalogReady(config, db, createTestIo());
+      assert.equal(ready.refreshed, false);
+      assert.equal(ready.catalog.tableCount, 1);
+      assert.equal(liveSchemaCalls, 0);
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+
+      if (originalUserProfile === undefined) {
+        delete process.env.USERPROFILE;
+      } else {
+        process.env.USERPROFILE = originalUserProfile;
+      }
+
+      await rm(temporaryHome, { recursive: true, force: true });
+    }
+  });
+
   await runTest("schema catalog freshness detects live schema drift", async () => {
     const db: DatabaseAdapter = createDatabaseStub({
       async getAllTableSchemas() {
@@ -224,6 +293,94 @@ export async function registerSchemaAndToolTests(runTest: RunTest): Promise<void
     assert.match(serialized.summary, /Cached result inspected/i);
   });
 
+  await runTest("render_last_result returns ready-to-display plain text for one cached page", async () => {
+    const result = await executeTool(
+      "render_last_result",
+      { offset: 0, limit: 2, columns: ["id", "email"] },
+      createToolRuntimeContext({
+        getLastResult: () => ({
+          sql: "select id, email from users order by id",
+          operation: "SELECT",
+          rowCount: 3,
+          rows: [
+            { id: 1, email: "a@example.com" },
+            { id: 2, email: "b@example.com" },
+            { id: 3, email: "c@example.com" },
+          ],
+          rowsTruncated: false,
+          fields: ["id", "email"],
+          elapsedMs: 2,
+        }),
+      }),
+    );
+
+    const rendered = result as { renderedText: string; hasMoreRows: boolean; rows: Array<Record<string, unknown>> };
+    assert.match(rendered.renderedText, /SQL result rows 1-2 of 3:/);
+    assert.match(rendered.renderedText, /a@example\.com/);
+    assert.match(rendered.renderedText, /More cached rows are available/i);
+    assert.equal(rendered.hasMoreRows, true);
+    assert.equal(rendered.rows.length, 2);
+  });
+
+  await runTest("render_last_result clamps oversized limits instead of failing validation", async () => {
+    const result = await executeTool(
+      "render_last_result",
+      { offset: 0, limit: 150, columns: ["id", "email"] },
+      createToolRuntimeContext({
+        getLastResult: () => ({
+          sql: "select id, email from users order by id",
+          operation: "SELECT",
+          rowCount: 8,
+          rows: [
+            { id: 1, email: "a@example.com" },
+            { id: 2, email: "b@example.com" },
+            { id: 3, email: "c@example.com" },
+            { id: 4, email: "d@example.com" },
+            { id: 5, email: "e@example.com" },
+            { id: 6, email: "f@example.com" },
+            { id: 7, email: "g@example.com" },
+            { id: 8, email: "h@example.com" },
+          ],
+          rowsTruncated: false,
+          fields: ["id", "email"],
+          elapsedMs: 2,
+        }),
+      }),
+    );
+
+    const rendered = result as { limit: number; rows: Array<Record<string, unknown>>; renderedText: string };
+    assert.equal(rendered.limit, 100);
+    assert.equal(rendered.rows.length, 8);
+    assert.match(rendered.renderedText, /Requested limit 150 exceeded the per-call maximum/i);
+  });
+
+  await runTest("render_last_result serializer returns plain text instead of json payload", () => {
+    const serialized = serializeToolResultForModel(
+      "render_last_result",
+      {
+        sql: "select id, email from users order by id",
+        operation: "SELECT",
+        rowCount: 3,
+        cachedRowCount: 3,
+        rowsTruncated: false,
+        fields: ["id", "email"],
+        offset: 0,
+        limit: 2,
+        rows: [
+          { id: 1, email: "a@example.com" },
+          { id: 2, email: "b@example.com" },
+        ],
+        renderedText: "SQL result rows 1-2 of 3:\nid | email\n---+------",
+        hasMoreRows: true,
+      },
+      createTestConfig().app,
+    );
+
+    assert.match(serialized.content, /SQL result rows 1-2 of 3:/);
+    assert.doesNotMatch(serialized.content, /^\{/);
+    assert.match(serialized.summary, /Cached result rendered/i);
+  });
+
   await runTest("inspect_last_explain returns a cached focused plan preview", async () => {
     const result = await executeTool(
       "inspect_last_explain",
@@ -269,6 +426,216 @@ export async function registerSchemaAndToolTests(runTest: RunTest): Promise<void
     assert.equal(payload.focus, "users");
     assert.match(String(payload.planPreview), /Seq Scan/);
     assert.match(serialized.summary, /Cached EXPLAIN inspected/i);
+  });
+
+  await runTest("inspect_history_entry returns the full messages for one completed turn", async () => {
+    const turn = createConversationTurn("show users", "turn-3");
+    turn.messages.push({
+      role: "assistant",
+      content: "Returned 3 rows.",
+    });
+    turn.summaryLines.push("Final answer: Returned 3 rows.");
+
+    const result = await executeTool(
+      "inspect_history_entry",
+      { turnId: "turn-3" },
+      createToolRuntimeContext({
+        history: {
+          inspectTurn: (turnId) =>
+            turnId === "turn-3"
+              ? {
+                  turnId: turn.id,
+                  summaryLines: [...turn.summaryLines],
+                  messages: turn.messages.map((message) => {
+                    switch (message.role) {
+                      case "system":
+                      case "user":
+                        return {
+                          role: message.role,
+                          content: message.content,
+                        };
+                      case "assistant":
+                        return {
+                          role: message.role,
+                          content: message.content,
+                          toolCallNames: message.tool_calls?.map((toolCall) => toolCall.function.name),
+                        };
+                      case "tool":
+                        return {
+                          role: message.role,
+                          content: message.content,
+                          toolCallId: message.tool_call_id,
+                          isError: message.is_error,
+                        };
+                    }
+                  }),
+                }
+              : null,
+          inspectPersistedOutput: () => null,
+        },
+      }),
+    );
+
+    const inspected = result as { kind: string; turnId: string; messages: Array<{ role: string; content: string | null }> };
+    assert.equal(inspected.kind, "turn");
+    assert.equal(inspected.turnId, "turn-3");
+    assert.equal(inspected.messages[0]?.role, "user");
+    assert.equal(inspected.messages[1]?.content, "Returned 3 rows.");
+  });
+
+  await runTest("inspect_history_entry can read a persisted tool output slice", async () => {
+    const result = await executeTool(
+      "inspect_history_entry",
+      { persistedOutputId: "tool-output-2", offset: 2, maxChars: 4 },
+      createToolRuntimeContext({
+        history: {
+          inspectTurn: () => null,
+          inspectPersistedOutput: (id) =>
+            id === "tool-output-2"
+              ? {
+                  persistedOutputId: "tool-output-2",
+                  turnId: "turn-4",
+                  toolName: "inspect_last_explain",
+                  summary: "Explain completed for SELECT in 8.00ms.",
+                  content: "ABCDEFGHIJ",
+                }
+              : null,
+        },
+      }),
+    );
+
+    const inspected = result as { kind: string; content: string; offset: number; returnedChars: number; truncated: boolean };
+    assert.equal(inspected.kind, "persisted_tool_output");
+    assert.equal(inspected.offset, 2);
+    assert.equal(inspected.content, "CDEF");
+    assert.equal(inspected.returnedChars, 4);
+    assert.equal(inspected.truncated, true);
+  });
+
+  await runTest("large tool payloads are persisted instead of being inlined into conversation history", async () => {
+    const config = createTestConfig();
+    config.app.contextCompression.largeToolOutputChars = 220;
+    config.app.contextCompression.persistedToolPreviewChars = 120;
+    const pushedMessages: Array<{ role: string; content: string }> = [];
+    const pushedSummaryLines: string[] = [];
+    const persistedOutputs: Array<{ id: string; content: string }> = [];
+
+    const failure = await executeAgentToolCall({
+      toolCall: {
+        id: "call_1",
+        type: "function",
+        function: {
+          name: "inspect_last_explain",
+          arguments: JSON.stringify({ maxChars: 4000 }),
+        },
+      },
+      runtime: createToolRuntimeContext({
+        getLastExplain: () => ({
+          sql: "select * from users where id = 1",
+          operation: "SELECT",
+          elapsedMs: 5,
+          warnings: ["Seq scan detected"],
+          rawPlan: "Node ".repeat(1500),
+        }),
+      }),
+      io: createTestIo(),
+      config,
+      memory: createSessionContextMemory(),
+      currentTurnId: "turn-1",
+      persistToolOutput: (entry) => {
+        const persisted = {
+          id: `tool-output-${persistedOutputs.length + 1}`,
+          turnId: "turn-1",
+          toolCallId: entry.toolCallId,
+          toolName: entry.toolName,
+          summary: entry.summary,
+          content: entry.content,
+        };
+        persistedOutputs.push(persisted);
+        return persisted;
+      },
+      pushCurrentTurnMessage(message) {
+        pushedMessages.push({
+          role: message.role,
+          content: message.role === "tool" ? message.content : "",
+        });
+      },
+      pushCurrentTurnSummary(line) {
+        pushedSummaryLines.push(line);
+      },
+    });
+
+    assert.equal(failure, null);
+    assert.equal(persistedOutputs.length, 1);
+    assert.equal(pushedMessages[0]?.role, "tool");
+    const payload = JSON.parse(pushedMessages[0]!.content) as Record<string, unknown>;
+    assert.equal(payload.persistedOutputId, "tool-output-1");
+    assert.match(String(payload.note), /omitted from active conversation context/i);
+    assert.ok(persistedOutputs[0]!.content.length > config.app.contextCompression.largeToolOutputChars);
+    assert.ok(pushedSummaryLines.some((line) => /Persisted tool output: tool-output-1/.test(line)));
+  });
+
+  await runTest("render_last_result stays inline even when the global large-output threshold is small", async () => {
+    const config = createTestConfig();
+    config.app.contextCompression.largeToolOutputChars = 80;
+    const pushedMessages: Array<{ role: string; content: string }> = [];
+    const persistedOutputs: Array<{ id: string; content: string }> = [];
+
+    const failure = await executeAgentToolCall({
+      toolCall: {
+        id: "call_2",
+        type: "function",
+        function: {
+          name: "render_last_result",
+          arguments: JSON.stringify({ offset: 0, limit: 20, columns: ["id", "email"] }),
+        },
+      },
+      runtime: createToolRuntimeContext({
+        getLastResult: () => ({
+          sql: "select id, email from users order by id",
+          operation: "SELECT",
+          rowCount: 6,
+          rows: [
+            { id: 1, email: "a@example.com" },
+            { id: 2, email: "b@example.com" },
+            { id: 3, email: "c@example.com" },
+            { id: 4, email: "d@example.com" },
+            { id: 5, email: "e@example.com" },
+            { id: 6, email: "f@example.com" },
+          ],
+          rowsTruncated: false,
+          fields: ["id", "email"],
+          elapsedMs: 2,
+        }),
+      }),
+      io: createTestIo(),
+      config,
+      memory: createSessionContextMemory(),
+      currentTurnId: "turn-2",
+      persistToolOutput: (entry) => {
+        const persisted = {
+          id: `tool-output-${persistedOutputs.length + 1}`,
+          turnId: "turn-2",
+          toolCallId: entry.toolCallId,
+          toolName: entry.toolName,
+          summary: entry.summary,
+          content: entry.content,
+        };
+        persistedOutputs.push(persisted);
+        return persisted;
+      },
+      pushCurrentTurnMessage(message) {
+        pushedMessages.push({
+          role: message.role,
+          content: message.role === "tool" ? message.content : "",
+        });
+      },
+      pushCurrentTurnSummary() {},
+    });
+
+    assert.equal(failure, null);
+    assert.equal(persistedOutputs.length, 0);
+    assert.match(pushedMessages[0]?.content ?? "", /SQL result rows 1-6 of 6:/);
   });
 
   await runTest("table DDL preview renders columns and constraints in CREATE TABLE form", () => {

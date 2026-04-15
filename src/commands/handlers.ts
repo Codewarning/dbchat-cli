@@ -3,8 +3,8 @@ import { assessSqlSafety } from "../db/safety.js";
 import { defaultPromptRuntime } from "../ui/prompts.js";
 import { getConfigPath, getMaskedConfig } from "../config/store.js";
 import type { ChatRuntimeState } from "../repl/runtime.js";
-import { refreshLocalSchemaCatalog, searchReadyLocalSchemaCatalog } from "../services/schema-catalog.js";
-import { confirmRemoteDataTransfer, requireRemoteDataTransferApproval } from "../services/remote-data-consent.js";
+import { ensureLocalSchemaCatalogReady, initializeLocalSchemaCatalogOnEntry, refreshLocalSchemaCatalog, searchLocalSchemaCatalog } from "../services/schema-catalog.js";
+import { requireRemoteDataTransferApproval } from "../services/remote-data-consent.js";
 import { executeManagedSql, explainSql } from "../services/sql.js";
 import {
   addDatabaseConfig,
@@ -34,7 +34,7 @@ import {
  */
 export async function handleAskCommand(prompt: string): Promise<void> {
   await withRuntime(async ({ config, db, io }) => {
-    await requireRemoteDataTransferApproval(io, "agent_session");
+    await initializeLocalSchemaCatalogOnEntry(config, db, io);
     const session = new AgentSession(config, db, io);
     const result = await session.run(prompt);
     io.logBlock("Final answer", result.content);
@@ -60,7 +60,6 @@ export async function handleSqlCommand(sql: string): Promise<void> {
       io,
       sql,
       approvalState: { allowAllForCurrentTurn: false },
-      confirmSchemaCatalogRefresh: () => confirmRemoteDataTransfer(io, "schema_catalog_refresh"),
     });
     if (execution.status === "cancelled") {
       io.log(execution.reason);
@@ -116,6 +115,7 @@ export async function handleChatCommand(): Promise<void> {
     loggerProfile: "verbose",
     showLifecycleLogs: false,
   });
+  await initializeLocalSchemaCatalogOnEntry(runtime.config, runtime.db, runtime.io);
   const state: ChatRuntimeState = {
     config: runtime.config,
     db: runtime.db,
@@ -129,7 +129,6 @@ export async function handleChatCommand(): Promise<void> {
   };
 
   try {
-    await requireRemoteDataTransferApproval(runtime.io, "agent_session");
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
       await startReadlineFallback("Ink requires a TTY terminal.");
       return;
@@ -170,9 +169,10 @@ export async function handleCatalogSyncCommand(): Promise<void> {
  */
 export async function handleCatalogSearchCommand(query: string, limit: number): Promise<void> {
   await withRuntime(async ({ config, db, io }) => {
+    const ready = await ensureLocalSchemaCatalogReady(config, db, io);
     await requireRemoteDataTransferApproval(io, "catalog_search");
-    const searched = await searchReadyLocalSchemaCatalog(config, db, io, query, limit);
-    printSchemaCatalogSearch(searched.search);
+    const search = await searchLocalSchemaCatalog(config, ready.catalog, query, limit);
+    printSchemaCatalogSearch(search);
   });
 }
 

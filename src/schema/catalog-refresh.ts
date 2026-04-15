@@ -1,9 +1,8 @@
 import type { DatabaseAdapter } from "../db/adapter.js";
 import type { AgentIO, AppConfig, SchemaCatalogSyncResult, SqlOperation } from "../types/index.js";
-import { syncSchemaCatalog } from "./catalog-sync.js";
 
 export interface SchemaCatalogRefreshOutcome {
-  status: "not_needed" | "refreshed" | "failed" | "skipped";
+  status: "not_needed" | "manual_required";
   reason: string;
   result?: SchemaCatalogSyncResult;
   error?: string;
@@ -63,7 +62,7 @@ export function shouldRefreshSchemaCatalogAfterSql(sql: string, operation: SqlOp
 }
 
 /**
- * Refresh the local schema catalog after a successful schema-changing SQL statement, while preserving the original SQL outcome if refresh fails.
+ * Report when a successful schema-changing SQL statement leaves the local schema catalog stale.
  */
 export async function refreshSchemaCatalogAfterSqlIfNeeded(
   config: AppConfig,
@@ -73,6 +72,9 @@ export async function refreshSchemaCatalogAfterSqlIfNeeded(
   operation: SqlOperation,
   allowRemoteRefresh = true,
 ): Promise<SchemaCatalogRefreshOutcome> {
+  void config;
+  void db;
+  void allowRemoteRefresh;
   if (!shouldRefreshSchemaCatalogAfterSql(sql, operation)) {
     return {
       status: "not_needed",
@@ -80,33 +82,9 @@ export async function refreshSchemaCatalogAfterSqlIfNeeded(
     };
   }
 
-  if (!allowRemoteRefresh) {
-    io.log("Schema catalog refresh skipped because remote data transfer was not approved.");
-    return {
-      status: "skipped",
-      reason: "The SQL statement succeeded, but the schema catalog refresh was skipped because remote data transfer was not approved.",
-    };
-  }
-
-  io.log("Refreshing local schema catalog after table schema change");
-
-  try {
-    const synced = await io.withLoading("Refreshing schema catalog", () => syncSchemaCatalog(config, db, io));
-    io.log(
-      `Schema catalog refreshed: ${synced.result.tableCount} tables, +${synced.result.addedTables.length} added, ~${synced.result.updatedTables.length} updated, -${synced.result.removedTables.length} removed`,
-    );
-    return {
-      status: "refreshed",
-      reason: "The executed SQL changed tracked table structure.",
-      result: synced.result,
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    io.log(`Warning: schema catalog refresh failed after SQL execution: ${message}`);
-    return {
-      status: "failed",
-      reason: "The SQL statement succeeded, but refreshing the local schema catalog failed.",
-      error: message,
-    };
-  }
+  io.log("Automatic schema catalog refresh is disabled after schema changes. Run `dbchat catalog sync` manually when you need updated schema search results.");
+  return {
+    status: "manual_required",
+    reason: "The SQL statement changed tracked table structure. Automatic schema catalog refresh is disabled; run `dbchat catalog sync` manually when you need updated schema search results.",
+  };
 }

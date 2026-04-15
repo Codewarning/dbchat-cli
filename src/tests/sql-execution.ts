@@ -100,8 +100,8 @@ export async function registerSqlExecutionTests(runTest: RunTest): Promise<void>
 
   await runTest("system prompt explains that blocked SQL does not reach approval", () => {
     const prompt = buildSystemPrompt(createTestConfig());
-    assert.match(prompt, /blocked before execution and no terminal approval prompt will appear/i);
-    assert.match(prompt, /Do not tell the user to confirm in the terminal in that case/i);
+    assert.match(prompt, /blocked before execution and never reaches terminal approval/i);
+    assert.match(prompt, /do not tell the user to confirm in the terminal/i);
   });
 
   await runTest("Approve Once executes one DML statement without unlocking later approvals", async () => {
@@ -427,6 +427,67 @@ export async function registerSqlExecutionTests(runTest: RunTest): Promise<void>
     assert.match(String(payload.previewTable), /email/);
     assert.match(String(payload.previewTable), /bookmark_count/);
     assert.match(String(payload.previewTable), /admin@123\.com/);
+  });
+
+  await runTest("datetime values stay readable in SQL payload previews instead of becoming empty objects", () => {
+    const serialized = serializeToolResultForModel(
+      "run_sql",
+      {
+        status: "executed",
+        sql: "select created_at from orders limit 1",
+        operation: "SELECT",
+        rowCount: 1,
+        rows: [
+          {
+            created_at: new Date("2024-01-02T03:04:05.000Z"),
+          },
+        ],
+        rowsTruncated: false,
+        fields: ["created_at"],
+        elapsedMs: 2.1,
+      },
+      createTestConfig().app,
+    );
+
+    const payload = JSON.parse(serialized.content) as {
+      previewRows?: Array<Record<string, unknown>>;
+      previewTable?: string;
+    };
+    assert.equal(payload.previewRows?.[0]?.created_at, "2024-01-02 03:04:05 UTC");
+    assert.match(String(payload.previewTable), /2024-01-02 03:04:05 UTC/);
+    assert.doesNotMatch(String(payload.previewTable), /\{\}/);
+  });
+
+  await runTest("bigint and scientific-notation values stay readable in SQL payload previews", () => {
+    const serialized = serializeToolResultForModel(
+      "run_sql",
+      {
+        status: "executed",
+        sql: "select total_cents, ratio from metrics limit 1",
+        operation: "SELECT",
+        rowCount: 1,
+        rows: [
+          {
+            total_cents: 12345678901234567890n,
+            ratio: 1.23e-7,
+          },
+        ],
+        rowsTruncated: false,
+        fields: ["total_cents", "ratio"],
+        elapsedMs: 1.8,
+      },
+      createTestConfig().app,
+    );
+
+    const payload = JSON.parse(serialized.content) as {
+      previewRows?: Array<Record<string, unknown>>;
+      previewTable?: string;
+    };
+    assert.equal(payload.previewRows?.[0]?.total_cents, "12345678901234567890");
+    assert.equal(payload.previewRows?.[0]?.ratio, "0.000000123");
+    assert.match(String(payload.previewTable), /12345678901234567890/);
+    assert.match(String(payload.previewTable), /0.000000123/);
+    assert.doesNotMatch(String(payload.previewTable), /e-7/i);
   });
 
   await runTest("wide SQL payload trims fields and can omit the text table preview", () => {

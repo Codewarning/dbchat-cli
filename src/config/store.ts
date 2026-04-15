@@ -2,6 +2,7 @@
 import { readFile } from "node:fs/promises";
 import {
   DEFAULT_APP_CONFIG,
+  DEFAULT_CONTEXT_COMPRESSION_CONFIG,
   getDefaultBaseUrlForApiFormat,
   getDefaultModelForApiFormat,
   getEmbeddingProviderPreset,
@@ -18,15 +19,15 @@ import type { AppConfig, DatabaseDialect, EmbeddingProvider, LlmApiFormat, LlmPr
 export { getConfigDirectory, getConfigPath } from "./paths.js";
 
 /**
- * Parse a numeric environment override and ignore invalid numbers.
+ * Parse a positive integer environment override and ignore invalid values.
  */
-function parseNumber(value: string | undefined): number | undefined {
+function parsePositiveInteger(value: string | undefined): number | undefined {
   if (!value) {
     return undefined;
   }
 
   const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 /**
@@ -167,7 +168,7 @@ export function buildResolvedAppConfig(stored: StoredConfig, env: NodeJS.Process
   const resolvedDatabaseIdentity = {
     dialect,
     host: pickFirstNonEmpty(env.DBCHAT_DB_HOST, selectedDatabase.host) ?? "",
-    port: parseNumber(env.DBCHAT_DB_PORT) ?? selectedDatabase.port ?? (dialect === "postgres" ? 5432 : 3306),
+    port: parsePositiveInteger(env.DBCHAT_DB_PORT) ?? selectedDatabase.port ?? (dialect === "postgres" ? 5432 : 3306),
     database: pickFirstNonEmpty(env.DBCHAT_DB_NAME, selectedDatabase.database) ?? "",
     schema: pickFirstNonEmpty(env.DBCHAT_DB_SCHEMA, selectedDatabase.schema),
   };
@@ -199,8 +200,30 @@ export function buildResolvedAppConfig(stored: StoredConfig, env: NodeJS.Process
       operationAccess: DEFAULT_DATABASE_OPERATION_ACCESS,
     },
     app: {
-      resultRowLimit: parseNumber(env.DBCHAT_RESULT_ROW_LIMIT) ?? stored.app?.resultRowLimit ?? DEFAULT_APP_CONFIG.resultRowLimit,
-      previewRowLimit: parseNumber(env.DBCHAT_PREVIEW_ROW_LIMIT) ?? stored.app?.previewRowLimit ?? DEFAULT_APP_CONFIG.previewRowLimit,
+      resultRowLimit: parsePositiveInteger(env.DBCHAT_RESULT_ROW_LIMIT) ?? stored.app?.resultRowLimit ?? DEFAULT_APP_CONFIG.resultRowLimit,
+      previewRowLimit: parsePositiveInteger(env.DBCHAT_PREVIEW_ROW_LIMIT) ?? stored.app?.previewRowLimit ?? DEFAULT_APP_CONFIG.previewRowLimit,
+      contextCompression: {
+        recentRawTurns:
+          parsePositiveInteger(env.DBCHAT_CONTEXT_RECENT_RAW_TURNS) ??
+          stored.app?.contextCompression?.recentRawTurns ??
+          DEFAULT_CONTEXT_COMPRESSION_CONFIG.recentRawTurns,
+        rawHistoryChars:
+          parsePositiveInteger(env.DBCHAT_CONTEXT_RAW_HISTORY_CHARS) ??
+          stored.app?.contextCompression?.rawHistoryChars ??
+          DEFAULT_CONTEXT_COMPRESSION_CONFIG.rawHistoryChars,
+        largeToolOutputChars:
+          parsePositiveInteger(env.DBCHAT_CONTEXT_LARGE_TOOL_OUTPUT_CHARS) ??
+          stored.app?.contextCompression?.largeToolOutputChars ??
+          DEFAULT_CONTEXT_COMPRESSION_CONFIG.largeToolOutputChars,
+        persistedToolPreviewChars:
+          parsePositiveInteger(env.DBCHAT_CONTEXT_PERSISTED_TOOL_PREVIEW_CHARS) ??
+          stored.app?.contextCompression?.persistedToolPreviewChars ??
+          DEFAULT_CONTEXT_COMPRESSION_CONFIG.persistedToolPreviewChars,
+        maxToolCallsPerTurn:
+          parsePositiveInteger(env.DBCHAT_CONTEXT_MAX_TOOL_CALLS_PER_TURN) ??
+          stored.app?.contextCompression?.maxToolCallsPerTurn ??
+          DEFAULT_CONTEXT_COMPRESSION_CONFIG.maxToolCallsPerTurn,
+      },
     },
   });
 }
@@ -260,6 +283,13 @@ export async function getMaskedConfig(): Promise<Record<string, unknown>> {
     app: {
       resultRowLimit: config.app?.resultRowLimit ?? null,
       previewRowLimit: config.app?.previewRowLimit ?? null,
+      contextCompression: {
+        recentRawTurns: config.app?.contextCompression?.recentRawTurns ?? null,
+        rawHistoryChars: config.app?.contextCompression?.rawHistoryChars ?? null,
+        largeToolOutputChars: config.app?.contextCompression?.largeToolOutputChars ?? null,
+        persistedToolPreviewChars: config.app?.contextCompression?.persistedToolPreviewChars ?? null,
+        maxToolCallsPerTurn: config.app?.contextCompression?.maxToolCallsPerTurn ?? null,
+      },
     },
   };
 }

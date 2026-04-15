@@ -4,9 +4,10 @@ import {
   getDefaultModelForApiFormat,
   getLlmProviderPreset,
   DEFAULT_APP_CONFIG,
+  DEFAULT_CONTEXT_COMPRESSION_CONFIG,
 } from "../config/defaults.js";
 import { getConfigPath, loadNormalizedStoredConfig, saveNormalizedStoredConfig } from "../config/store.js";
-import type { AppRuntimeConfig, LlmApiFormat, LlmProvider } from "../types/index.js";
+import type { AppRuntimeConfig, ContextCompressionConfig, LlmApiFormat, LlmProvider } from "../types/index.js";
 import { defaultPromptRuntime, type PromptRuntime } from "../ui/prompts.js";
 import { promptEmbeddingConfig } from "./embedding-config-helpers.js";
 import {
@@ -32,7 +33,14 @@ function parsePositiveInteger(value: string, label: string): number {
 /**
  * Prompt for app-level runtime limits.
  */
-async function promptAppRuntimeConfig(prompts: PromptRuntime, existing?: Partial<AppRuntimeConfig>): Promise<AppRuntimeConfig> {
+async function promptAppRuntimeConfig(
+  prompts: PromptRuntime,
+  existing?: {
+    resultRowLimit?: number;
+    previewRowLimit?: number;
+    contextCompression?: Partial<ContextCompressionConfig>;
+  },
+): Promise<AppRuntimeConfig> {
   const resultRowLimit = await prompts.selectOrInput(
     "Max cached result rows",
     [
@@ -61,6 +69,10 @@ async function promptAppRuntimeConfig(prompts: PromptRuntime, existing?: Partial
   return {
     resultRowLimit: parsePositiveInteger(resultRowLimit, "Max cached result rows"),
     previewRowLimit: parsePositiveInteger(previewRowLimit, "Preview row limit"),
+    contextCompression: {
+      ...DEFAULT_CONTEXT_COMPRESSION_CONFIG,
+      ...existing?.contextCompression,
+    },
   };
 }
 

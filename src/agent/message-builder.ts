@@ -1,6 +1,6 @@
 import type { LlmMessageParam } from "../llm/types.js";
 import type { AppConfig, PlanItem, QueryExecutionResult } from "../types/index.js";
-import { estimateTurnSize, MAX_RAW_HISTORY_CHARS, type ConversationTurn, type SessionContextMemory } from "./memory.js";
+import { estimateTurnSize, type ConversationTurn, type SessionContextMemory } from "./memory.js";
 import { buildContextPrompt, buildSystemPrompt } from "./prompts.js";
 import { buildContextPromptProfile } from "./session-policy.js";
 
@@ -8,6 +8,7 @@ function getRecentRawMessages(
   completedTurns: ConversationTurn[],
   currentTurn: ConversationTurn | null,
   includePreviousTurns: boolean,
+  rawHistoryChars: number,
 ): LlmMessageParam[] {
   const turns = includePreviousTurns
     ? currentTurn
@@ -23,7 +24,7 @@ function getRecentRawMessages(
     const turn = turns[index];
     const turnSize = estimateTurnSize(turn);
     const mustInclude = selectedTurns.length === 0;
-    if (!mustInclude && usedChars + turnSize > MAX_RAW_HISTORY_CHARS) {
+    if (!mustInclude && usedChars + turnSize > rawHistoryChars) {
       break;
     }
 
@@ -69,6 +70,13 @@ export function buildSessionMessages(
     });
   }
 
-  messages.push(...getRecentRawMessages(completedTurns, currentTurn, contextProfile.includePriorRawTurns));
+  messages.push(
+    ...getRecentRawMessages(
+      completedTurns,
+      currentTurn,
+      contextProfile.includePriorRawTurns,
+      config.app.contextCompression.rawHistoryChars,
+    ),
+  );
   return messages;
 }

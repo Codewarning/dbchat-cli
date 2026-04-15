@@ -1,6 +1,7 @@
 import type { DatabaseAdapter } from "../db/adapter.js";
-import { ensureSchemaCatalogReady as ensureRuntimeSchemaCatalogReady, searchSchemaCatalog, syncSchemaCatalog } from "../schema/catalog.js";
+import { ensureSchemaCatalogReady as ensureRuntimeSchemaCatalogReady, initializeSchemaCatalogOnEntry, searchSchemaCatalog, syncSchemaCatalog } from "../schema/catalog.js";
 import type { AgentIO, AppConfig, SchemaCatalog, SchemaCatalogSearchResult, SchemaCatalogSyncResult } from "../types/index.js";
+import { confirmRemoteDataTransfer } from "./remote-data-consent.js";
 
 export interface ReadySchemaCatalogResult {
   catalog: SchemaCatalog;
@@ -25,7 +26,7 @@ export async function refreshLocalSchemaCatalog(
 }
 
 /**
- * Load a compatible local schema catalog or rebuild it when it is missing or stale.
+ * Load the already-initialized compatible local schema catalog for the current database.
  */
 export async function ensureLocalSchemaCatalogReady(
   config: AppConfig,
@@ -33,6 +34,36 @@ export async function ensureLocalSchemaCatalogReady(
   io: AgentIO,
 ): Promise<ReadySchemaCatalogResult> {
   return ensureRuntimeSchemaCatalogReady(config, db, io);
+}
+
+/**
+ * Initialize the local schema catalog when the database runtime is first entered, but never refresh it automatically later.
+ */
+export async function initializeLocalSchemaCatalogOnEntry(
+  config: AppConfig,
+  db: DatabaseAdapter,
+  io: AgentIO,
+): Promise<ReadySchemaCatalogResult | null> {
+  try {
+    return await ensureRuntimeSchemaCatalogReady(config, db, io);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    io.log(message);
+  }
+
+  const approved = await confirmRemoteDataTransfer(io, "catalog_sync");
+  if (!approved) {
+    io.log("Skipped local schema catalog initialization. Run `dbchat catalog sync` later if you need schema search tools.");
+    return null;
+  }
+
+  try {
+    return await initializeSchemaCatalogOnEntry(config, db, io);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    io.log(`Warning: local schema catalog initialization failed: ${message}`);
+    return null;
+  }
 }
 
 /**
@@ -48,7 +79,7 @@ export async function searchLocalSchemaCatalog(
 }
 
 /**
- * Ensure the local schema catalog is ready first, then run one search over it.
+ * Load the existing local schema catalog first, then run one search over it.
  */
 export async function searchReadyLocalSchemaCatalog(
   config: AppConfig,

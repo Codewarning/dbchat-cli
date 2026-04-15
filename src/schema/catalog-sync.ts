@@ -91,30 +91,54 @@ export async function assessSchemaCatalogFreshness(
 }
 
 /**
- * Reuse an existing compatible schema catalog when available and rebuild it only when required.
+ * Return the already-built local schema catalog when it matches the current embedding configuration.
  */
 export async function ensureSchemaCatalogReady(
+  appConfig: AppConfig,
+  _db: DatabaseAdapter,
+  io: Pick<AgentIO, "log" | "withLoading" | "createProgressHandle">,
+): Promise<{ catalog: SchemaCatalog; refreshed: boolean; result: SchemaCatalogSyncResult | null }> {
+  const existingCatalog = await loadSchemaCatalog(appConfig.database);
+  if (!existingCatalog) {
+    throw new Error(
+      "No local schema catalog is available for the current database. Reload the database and approve catalog initialization, or run `dbchat catalog sync`.",
+    );
+  }
+
+  if (!isSchemaCatalogCompatible(existingCatalog, appConfig.embedding)) {
+    throw new Error(
+      "The local schema catalog was built with a different embedding configuration. Reload the database and approve catalog initialization, or run `dbchat catalog sync`.",
+    );
+  }
+
+  io.log(`Using existing local schema catalog: ${existingCatalog.tableCount} tables`);
+  return {
+    catalog: existingCatalog,
+    refreshed: false,
+    result: null,
+  };
+}
+
+/**
+ * Build the local schema catalog when the active database is first loaded and no compatible catalog exists yet.
+ */
+export async function initializeSchemaCatalogOnEntry(
   appConfig: AppConfig,
   db: DatabaseAdapter,
   io: Pick<AgentIO, "log" | "withLoading" | "createProgressHandle">,
 ): Promise<{ catalog: SchemaCatalog; refreshed: boolean; result: SchemaCatalogSyncResult | null }> {
   const existingCatalog = await loadSchemaCatalog(appConfig.database);
-  if (existingCatalog) {
-    if (!isSchemaCatalogCompatible(existingCatalog, appConfig.embedding)) {
-      io.log("Local schema catalog is incompatible with the current embedding configuration. Rebuilding it now.");
-    } else {
-      const freshness = await io.withLoading("Checking schema catalog freshness", () => assessSchemaCatalogFreshness(existingCatalog, db));
-      if (freshness.fresh) {
-        io.log(`Using existing local schema catalog: ${existingCatalog.tableCount} tables`);
-        return {
-          catalog: existingCatalog,
-          refreshed: false,
-          result: null,
-        };
-      }
+  if (existingCatalog && isSchemaCatalogCompatible(existingCatalog, appConfig.embedding)) {
+    io.log(`Using existing local schema catalog: ${existingCatalog.tableCount} tables`);
+    return {
+      catalog: existingCatalog,
+      refreshed: false,
+      result: null,
+    };
+  }
 
-      io.log(`Local schema catalog is outdated. Rebuilding it now. Reason: ${freshness.reason}`);
-    }
+  if (existingCatalog) {
+    io.log("Local schema catalog is incompatible with the current embedding configuration. Rebuilding it now.");
   } else {
     io.log("Local schema catalog is missing. Building it now.");
   }
