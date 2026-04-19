@@ -1,7 +1,7 @@
 // PostgreSQL adapter backed by node-postgres.
 import { performance } from "node:perf_hooks";
 import { Pool } from "pg";
-import type { DatabaseConfig, QueryExecutionResult, QueryPlanResult, SchemaSummary, TableColumn, TableSchema } from "../types/index.js";
+import type { DatabaseConfig, QueryExecutionResult, QueryPlanResult, SchemaSummary, TableColumn, TableRelation, TableSchema } from "../types/index.js";
 import { buildTableSchema, type TableConstraintDefinition } from "./table-schema.js";
 import { assessSqlSafety, inferSqlOperation } from "./safety.js";
 import type { DatabaseAdapter, SchemaSummaryOptions } from "./adapter.js";
@@ -23,10 +23,12 @@ interface TableNameRow {
 
 interface ColumnRow {
   table_name?: string;
+  table_comment?: string | null;
   column_name: string;
   data_type: string;
   is_nullable: "YES" | "NO";
   column_default: string | null;
+  column_comment?: string | null;
 }
 
 interface ConstraintRow {
@@ -34,6 +36,13 @@ interface ConstraintRow {
   constraint_name: string;
   constraint_type: "PRIMARY KEY" | "UNIQUE";
   constraint_columns: string[];
+}
+
+interface ForeignKeyRow {
+  table_name: string;
+  referenced_table_name: string;
+  fk_columns: string[];
+  referenced_columns: string[];
 }
 
 interface QueryFieldLike {
@@ -46,6 +55,7 @@ function toTableColumn(row: ColumnRow): TableColumn {
     dataType: row.data_type,
     isNullable: row.is_nullable === "YES",
     defaultValue: row.column_default,
+    comment: row.column_comment ?? null,
   };
 }
 
@@ -65,8 +75,31 @@ function buildConstraintMap(rows: ConstraintRow[]): Map<string, TableConstraintD
   return grouped;
 }
 
-function groupTableSchemas(rows: ColumnRow[], constraintMap: Map<string, TableConstraintDefinition[]>): TableSchema[] {
+function buildRelationMap(rows: ForeignKeyRow[]): Map<string, TableRelation[]> {
+  const grouped = new Map<string, TableRelation[]>();
+
+  for (const row of rows) {
+    const relations = grouped.get(row.table_name) ?? [];
+    relations.push({
+      toTable: row.referenced_table_name,
+      fromColumns: row.fk_columns,
+      toColumns: row.referenced_columns,
+      type: "foreign_key",
+      source: "database",
+    });
+    grouped.set(row.table_name, relations);
+  }
+
+  return grouped;
+}
+
+function groupTableSchemas(
+  rows: ColumnRow[],
+  constraintMap: Map<string, TableConstraintDefinition[]>,
+  relationMap: Map<string, TableRelation[]>,
+): TableSchema[] {
   const grouped = new Map<string, TableColumn[]>();
+  const comments = new Map<string, string | null>();
 
   for (const row of rows) {
     const tableName = row.table_name;
@@ -77,10 +110,23 @@ function groupTableSchemas(rows: ColumnRow[], constraintMap: Map<string, TableCo
     const columns = grouped.get(tableName) ?? [];
     columns.push(toTableColumn(row));
     grouped.set(tableName, columns);
+    if (!comments.has(tableName)) {
+      comments.set(tableName, row.table_comment ?? null);
+    }
   }
 
   return Array.from(grouped.entries())
-    .map(([tableName, columns]) => buildTableSchema(tableName, columns, constraintMap.get(tableName) ?? [], undefined, "reconstructed"))
+    .map(([tableName, columns]) =>
+      buildTableSchema(
+        tableName,
+        columns,
+        constraintMap.get(tableName) ?? [],
+        undefined,
+        "reconstructed",
+        comments.get(tableName) ?? null,
+        relationMap.get(tableName) ?? [],
+      ),
+    )
     .sort((left, right) => left.tableName.localeCompare(right.tableName));
 }
 
@@ -88,10 +134,12 @@ function buildColumnMetadataQuery(includeTableFilter: boolean): string {
   return `
     select
       c.table_name,
+      obj_description(cls.oid, 'pg_class') as table_comment,
       c.column_name,
       pg_catalog.format_type(a.atttypid, a.atttypmod) as data_type,
       c.is_nullable,
-      c.column_default
+      c.column_default,
+      col_description(cls.oid, a.attnum) as column_comment
     from information_schema.columns c
     join information_schema.tables t
       on t.table_name = c.table_name
@@ -110,6 +158,30 @@ function buildColumnMetadataQuery(includeTableFilter: boolean): string {
      and t.table_type = 'BASE TABLE'
      ${includeTableFilter ? "and c.table_name = $2" : ""}
    order by c.table_name, c.ordinal_position
+  `;
+}
+
+function buildForeignKeyMetadataQuery(includeTableFilter: boolean): string {
+  return `
+    select
+      tc.table_name,
+      ccu.table_name as referenced_table_name,
+      array_agg(kcu.column_name order by kcu.ordinal_position)::text[] as fk_columns,
+      array_agg(ccu.column_name order by kcu.ordinal_position)::text[] as referenced_columns
+    from information_schema.table_constraints tc
+    join information_schema.key_column_usage kcu
+      on kcu.constraint_schema = tc.constraint_schema
+     and kcu.constraint_name = tc.constraint_name
+     and kcu.table_schema = tc.table_schema
+     and kcu.table_name = tc.table_name
+    join information_schema.constraint_column_usage ccu
+      on ccu.constraint_schema = tc.constraint_schema
+     and ccu.constraint_name = tc.constraint_name
+   where tc.table_schema = $1
+     and tc.constraint_type = 'FOREIGN KEY'
+     ${includeTableFilter ? "and tc.table_name = $2" : ""}
+   group by tc.table_name, tc.constraint_name, ccu.table_name
+   order by tc.table_name, tc.constraint_name
   `;
 }
 
@@ -246,12 +318,13 @@ export class PostgresAdapter implements DatabaseAdapter {
    */
   async getAllTableSchemas(): Promise<TableSchema[]> {
     const schema = this.config.schema ?? "public";
-    const [columnResult, constraintResult] = await Promise.all([
+    const [columnResult, constraintResult, foreignKeyResult] = await Promise.all([
       this.pool.query<ColumnRow>(buildColumnMetadataQuery(false), [schema]),
       this.pool.query<ConstraintRow>(buildConstraintMetadataQuery(false), [schema]),
+      this.pool.query<ForeignKeyRow>(buildForeignKeyMetadataQuery(false), [schema]),
     ]);
 
-    return groupTableSchemas(columnResult.rows, buildConstraintMap(constraintResult.rows));
+    return groupTableSchemas(columnResult.rows, buildConstraintMap(constraintResult.rows), buildRelationMap(foreignKeyResult.rows));
   }
 
   /**
@@ -259,9 +332,10 @@ export class PostgresAdapter implements DatabaseAdapter {
    */
   async describeTable(tableName: string): Promise<TableSchema> {
     const schema = this.config.schema ?? "public";
-    const [columnResult, constraintResult] = await Promise.all([
+    const [columnResult, constraintResult, foreignKeyResult] = await Promise.all([
       this.pool.query<ColumnRow>(buildColumnMetadataQuery(true), [schema, tableName]),
       this.pool.query<ConstraintRow>(buildConstraintMetadataQuery(true), [schema, tableName]),
+      this.pool.query<ForeignKeyRow>(buildForeignKeyMetadataQuery(true), [schema, tableName]),
     ]);
 
     if (!columnResult.rowCount) {
@@ -274,6 +348,8 @@ export class PostgresAdapter implements DatabaseAdapter {
       buildConstraintMap(constraintResult.rows).get(tableName) ?? [],
       undefined,
       "reconstructed",
+      columnResult.rows[0]?.table_comment ?? null,
+      buildRelationMap(foreignKeyResult.rows).get(tableName) ?? [],
     );
   }
 

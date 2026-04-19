@@ -3,6 +3,7 @@ import process from "node:process";
 import { AgentSession } from "../agent/session.js";
 import type { AgentIO } from "../types/index.js";
 import { createReadlinePromptRuntime } from "../ui/prompts.js";
+import { buildResultArtifactDisplayText } from "../ui/result-artifacts.js";
 import { formatDatabaseTarget, type ChatRuntimeState } from "./runtime.js";
 import {
   handleClearCommand,
@@ -14,6 +15,11 @@ import {
   printHelp,
   type SlashCommandPresenter,
 } from "./slash-commands.js";
+
+export function shouldTreatReadlineQuestionErrorAsExit(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /readline was closed|operation was aborted|aborted/i.test(message);
+}
 
 function printReadlineBanner(target: string): void {
   console.log("dbchat is ready. Enter a natural-language request, or type /help.");
@@ -61,7 +67,17 @@ export async function startReadlineChatRepl(state: ChatRuntimeState, io: AgentIO
 
   try {
     while (true) {
-      const line = (await rl.question("dbchat> ")).trim();
+      let line = "";
+      try {
+        line = (await rl.question("dbchat> ")).trim();
+      } catch (error) {
+        if (shouldTreatReadlineQuestionErrorAsExit(error)) {
+          return;
+        }
+
+        throw error;
+      }
+
       if (!line) {
         continue;
       }
@@ -108,12 +124,23 @@ export async function startReadlineChatRepl(state: ChatRuntimeState, io: AgentIO
 
         const result = await state.session.run(line);
         io.logBlock("Final answer", result.content);
+        for (const block of result.displayBlocks) {
+          io.logBlock(block.title, block.body);
+        }
+        const artifactDisplay = buildResultArtifactDisplayText(result.lastResult?.htmlArtifact);
+        if (artifactDisplay) {
+          io.logBlock("Artifacts", artifactDisplay);
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         io.log(`Error: ${message}`);
       }
     }
   } finally {
-    rl.close();
+    try {
+      rl.close();
+    } catch {
+      // Ignore duplicate close races during non-interactive shutdown.
+    }
   }
 }

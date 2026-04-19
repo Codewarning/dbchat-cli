@@ -5,28 +5,28 @@ import { stringifyCompact } from "../serialize-helpers.js";
 import { defineTool } from "../specs.js";
 
 const exportSchema = z.object({
-  format: z.enum(["json", "csv"]),
-  outputPath: z.string().min(1),
+  format: z.enum(["json"]),
+  outputPath: z.string().min(1).optional(),
 });
 
 export const exportLastResultTool = defineTool(
   {
     name: "export_last_result",
-    description: "Export the most recent query result to a file.",
+    description: "Export the most recent query result to a JSON file under ~/.db-chat-cli/tmp/. CSV files are generated automatically with HTML result views.",
     parameters: {
       type: "object",
       additionalProperties: false,
       properties: {
         format: {
           type: "string",
-          enum: ["json", "csv"],
+          enum: ["json"],
         },
         outputPath: {
           type: "string",
-          description: "The output path. Relative paths are resolved inside the current working directory.",
+          description: "Optional preferred file name for the JSON export. The export is always written under ~/.db-chat-cli/tmp/.",
         },
       },
-      required: ["format", "outputPath"],
+      required: ["format"],
     },
   },
   exportSchema,
@@ -48,6 +48,7 @@ export const exportLastResultTool = defineTool(
     const payload = {
       format: exported.format,
       outputPath: exported.outputPath,
+      fileUrl: exported.fileUrl,
       rowCount: exported.rowCount,
       truncated: exported.truncated,
     };

@@ -13,6 +13,10 @@ export interface ChatEntry {
     database?: string;
     permission?: string;
     plan?: PlanItem[];
+    table?: {
+      fields: string[];
+      rows: Record<string, unknown>[];
+    };
   };
 }
 

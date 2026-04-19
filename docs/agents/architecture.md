@@ -45,7 +45,7 @@ Responsibilities:
 
 - keep command handlers and LLM tools thin by centralizing repeated orchestration
 - share one SQL execution path for direct CLI SQL, tool-driven SQL, approval gating, and post-execution schema-catalog staleness notices
-- share one schema-catalog path for initialization, manual refresh, and search flows
+- share one schema-catalog path for initialization, manual refresh, and local snapshot search flows
 
 ### 3. Agent Layer
 
@@ -66,6 +66,7 @@ Responsibilities:
 - keep oversized tool payloads out of model-visible history by replacing them with persisted-output markers that can be inspected later on demand
 - maintain in-memory plan
 - maintain latest query result
+- load the active target's layered `global > host > database` instruction files before each turn and inject the runtime view into the LLM request as a separate system message
 - keep request-intent heuristics, finer-grained request context classification, request-aware context packing, message assembly, and tool execution helpers separated so the session coordinator can stay focused on control flow
 - execute the minimal loop:
   - send messages to LLM
@@ -125,7 +126,9 @@ Responsibilities:
 
 - persist one local schema snapshot per database target
 - compute table-level hashes for refresh diffing
-- generate LLM-backed table descriptions and tags for retrieval
+- load the same layered `global > host > database` instruction files during catalog rebuilds, using the catalog view of those files
+- persist an instruction fingerprint in each catalog snapshot so regenerated catalogs can track instruction-layer changes separately from schema changes
+- carry a clipped instruction-context summary into table documents and optional embedding text so local retrieval can reuse business hints
 - persist one embedding vector per table for semantic search
 - use a configured OpenAI-compatible embedding API for indexing and query embeddings
 - provide searchable table summaries before live introspection
@@ -154,6 +157,7 @@ Responsibilities:
 Files:
 
 - `src/config/*`
+- `src/instructions/scoped.ts`
 - `src/config/database-hosts.ts`
 - `src/export/csv.ts`
 - `src/ui/prompts.ts`
@@ -164,6 +168,7 @@ Files:
 Responsibilities:
 
 - config defaults and validation
+- layered instruction path resolution plus `Shared` / `Runtime` / `Catalog` section selection
 - runtime context-compression defaults and validation
 - stored multi-host database config normalization, runtime access defaults, and active target selection
 - export helpers

@@ -23,7 +23,6 @@ The product goal is to feel like a database-focused `codex cli` / `claude code` 
 
 ## Required Invariants
 
-- User-visible CLI text must be in English.
 - All mutating SQL must require explicit user confirmation before execution.
 - Only a single SQL statement may be executed at a time.
 - Prefer schema inspection over guessing table or column names.

@@ -1,38 +1,42 @@
-import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { getConfigDirectory } from "../config/paths.js";
 import { writeFileAtomic } from "../fs/atomic-write.js";
 import type { DatabaseConfig, SchemaCatalog } from "../types/index.js";
 
-export const SCHEMA_CATALOG_VERSION = 6;
+export const SCHEMA_CATALOG_VERSION = 9;
 
 /**
- * Build a filesystem-safe fragment for one database identifier component.
+ * Build a filesystem-safe but readable fragment for one database identifier component.
  */
 function sanitizePathFragment(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "database";
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[<>:"/\\|?*\u0000-\u001f]+/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "") || "default";
 }
 
 /**
- * Build one readable path segment with a short digest to avoid collisions after sanitization.
+ * Build one readable path segment for the host and port scope.
  */
-function buildScopedPathFragment(label: string, identity: string): string {
-  const digest = createHash("sha256").update(identity).digest("hex").slice(0, 12);
-  return `${sanitizePathFragment(label)}-${digest}`;
+function buildHostScopeFragment(config: DatabaseConfig): string {
+  return `${sanitizePathFragment(config.host)}-${config.port}`;
 }
 
 /**
- * Build the persisted schema catalog relative path for one database target.
+ * Build the persisted schema catalog relative directory for one database target.
  */
-function buildSchemaCatalogRelativePath(config: DatabaseConfig): string {
-  const schemaName = config.schema ?? "default";
+function buildSchemaCatalogRelativeDirectory(config: DatabaseConfig): string {
+  const schemaName = config.dialect === "mysql" ? "public" : config.schema ?? "default";
   const dialectDirectory = sanitizePathFragment(config.dialect);
-  const hostDirectory = buildScopedPathFragment(`${config.host}-${config.port}`, JSON.stringify({ host: config.host, port: config.port }));
-  const databaseDirectory = buildScopedPathFragment(config.database, config.database);
-  const schemaFileName = `${buildScopedPathFragment(schemaName, schemaName)}.json`;
+  const hostDirectory = buildHostScopeFragment(config);
+  const databaseDirectory = sanitizePathFragment(config.database);
+  const schemaDirectory = sanitizePathFragment(schemaName);
 
-  return path.join(dialectDirectory, hostDirectory, databaseDirectory, schemaFileName);
+  return path.join(dialectDirectory, hostDirectory, databaseDirectory, schemaDirectory);
 }
 
 /**
@@ -43,10 +47,17 @@ export function getSchemaCatalogDirectory(): string {
 }
 
 /**
+ * Return the scope directory for one database target.
+ */
+export function getSchemaCatalogScopeDirectory(config: DatabaseConfig): string {
+  return path.join(getSchemaCatalogDirectory(), buildSchemaCatalogRelativeDirectory(config));
+}
+
+/**
  * Return the full catalog path for one database target.
  */
 export function getSchemaCatalogPath(config: DatabaseConfig): string {
-  return path.join(getSchemaCatalogDirectory(), buildSchemaCatalogRelativePath(config));
+  return path.join(getSchemaCatalogScopeDirectory(config), "catalog.json");
 }
 
 /**

@@ -6,16 +6,97 @@ import path from "node:path";
 import type { DatabaseAdapter } from "../db/adapter.js";
 import { createConversationTurn, createSessionContextMemory } from "../agent/memory.js";
 import { executeAgentToolCall } from "../agent/tool-execution.js";
+import { readMySqlRowField } from "../db/mysql.js";
 import { getEmbeddingModelInfo } from "../embedding/config.js";
+import { initializeLocalSchemaCatalogOnEntry } from "../services/schema-catalog.js";
 import { buildCreateTableDdl } from "../schema/table-ddl.js";
 import { SCHEMA_CATALOG_VERSION } from "../schema/catalog-storage.js";
-import { assessSchemaCatalogFreshness, ensureSchemaCatalogReady, saveSchemaCatalog } from "../schema/catalog.js";
+import {
+  assessSchemaCatalogFreshness,
+  ensureSchemaCatalogReady,
+  getSchemaCatalogPath,
+  saveSchemaCatalog,
+  searchSchemaCatalog,
+  syncSchemaCatalog,
+} from "../schema/catalog.js";
 import { executeTool } from "../tools/registry.js";
 import { serializeToolResultForModel } from "../tools/model-payload.js";
+import { formatRecordsTable } from "../ui/text-table.js";
 import { formatSchemaSummaryText, formatTableSchemaText } from "../ui/text-formatters.js";
+import type { SchemaCatalog, SchemaCatalogTable } from "../types/index.js";
 import { RunTest, createDatabaseStub, createTestConfig, createTestIo, createToolRuntimeContext } from "./support.js";
 
+function createCatalogTableFixture(overrides: Partial<SchemaCatalogTable> = {}): SchemaCatalogTable {
+  return {
+    tableName: "users",
+    schemaHash: "users-hash",
+    summaryText: "users table",
+    instructionContext: undefined,
+    description: "Stores users.",
+    tags: ["users", "accounts", "profiles"],
+    aliases: [],
+    examples: [],
+    embeddingText: "users",
+    embeddingVector: [0.1, 0.2],
+    columns: [{ name: "id", dataType: "integer", isNullable: false, defaultValue: null }],
+    relations: [],
+    ...overrides,
+  };
+}
+
+function createCatalogFixture(config = createTestConfig(), tableOverrides: Array<Partial<SchemaCatalogTable>> = []): SchemaCatalog {
+  const tables = tableOverrides.length ? tableOverrides.map((overrides) => createCatalogTableFixture(overrides)) : [createCatalogTableFixture()];
+  return {
+    version: SCHEMA_CATALOG_VERSION,
+    dialect: config.database.dialect,
+    host: config.database.host,
+    port: config.database.port,
+    database: config.database.database,
+    schema: config.database.schema,
+    generatedAt: new Date().toISOString(),
+    tableCount: tables.length,
+    documentCount: 0,
+    instructionFingerprint: null,
+    embeddingModelId: getEmbeddingModelInfo(config.embedding).modelId,
+    tables,
+    documents: [],
+  };
+}
+
 export async function registerSchemaAndToolTests(runTest: RunTest): Promise<void> {
+  await runTest("formatRecordsTable truncates long cell values onto a single line without trailing whitespace", () => {
+    const rendered = formatRecordsTable(
+      [
+        {
+          id: 1,
+          note: "This value is intentionally long so the table renderer must wrap it instead of pushing one very wide line.",
+        },
+      ],
+      ["id", "note"],
+    );
+
+    assert.match(rendered, /^id\s+\| note$/m);
+    assert.match(rendered, /^1\s+\| This value is intentionally long so…$/m);
+    assert.doesNotMatch(rendered, /^\s+\|/m);
+    assert.doesNotMatch(rendered, /[ \t]+$/m);
+  });
+
+  await runTest("formatRecordsTable computes column widths from the visible content of each column", () => {
+    const rendered = formatRecordsTable(
+      [
+        { id: 1, name: "Alice" },
+        { id: 22, name: "Bo" },
+      ],
+      ["id", "name"],
+    );
+
+    const [headerLine, separatorLine, firstRow] = rendered.split("\n");
+    assert.equal(headerLine, "id   | name");
+    assert.equal(separatorLine, "-----+------");
+    assert.equal(firstRow, "1    | Alice");
+    assert.ok((headerLine?.length ?? 0) < 20);
+  });
+
   await runTest("schema catalog loading reuses the stored snapshot without live freshness checks", async () => {
     const temporaryHome = await mkdtemp(path.join(os.tmpdir(), "dbchat-catalog-"));
     const originalHome = process.env.HOME;
@@ -25,42 +106,60 @@ export async function registerSchemaAndToolTests(runTest: RunTest): Promise<void
 
     try {
       const config = createTestConfig();
-      await saveSchemaCatalog(config.database, {
-        version: SCHEMA_CATALOG_VERSION,
-        dialect: config.database.dialect,
-        host: config.database.host,
-        port: config.database.port,
-        database: config.database.database,
-        schema: config.database.schema,
-        generatedAt: new Date().toISOString(),
-        tableCount: 1,
-        embeddingModelId: getEmbeddingModelInfo(config.embedding).modelId,
-        tables: [
-          {
-            tableName: "users",
-            schemaHash: "users-hash",
-            summaryText: "users table",
-            description: "Stores users.",
-            tags: ["users", "accounts", "profiles"],
-            embeddingText: "users",
-            embeddingVector: [0.1, 0.2],
-            columns: [{ name: "id", dataType: "integer", isNullable: false, defaultValue: null }],
-          },
-        ],
-      });
+      await saveSchemaCatalog(config.database, createCatalogFixture(config));
 
-      let liveSchemaCalls = 0;
-      const db: DatabaseAdapter = createDatabaseStub({
-        async getAllTableSchemas() {
-          liveSchemaCalls += 1;
-          throw new Error("should not inspect live schema");
-        },
-      });
-
-      const ready = await ensureSchemaCatalogReady(config, db, createTestIo());
+      const ready = await ensureSchemaCatalogReady(config, createTestIo());
       assert.equal(ready.refreshed, false);
       assert.equal(ready.catalog.tableCount, 1);
-      assert.equal(liveSchemaCalls, 0);
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+
+      if (originalUserProfile === undefined) {
+        delete process.env.USERPROFILE;
+      } else {
+        process.env.USERPROFILE = originalUserProfile;
+      }
+
+      await rm(temporaryHome, { recursive: true, force: true });
+    }
+  });
+
+  await runTest("runtime catalog initialization no longer waits for confirm() when embeddings are enabled", async () => {
+    const temporaryHome = await mkdtemp(path.join(os.tmpdir(), "dbchat-catalog-init-"));
+    const originalHome = process.env.HOME;
+    const originalUserProfile = process.env.USERPROFILE;
+    process.env.HOME = temporaryHome;
+    process.env.USERPROFILE = temporaryHome;
+
+    try {
+      const config = createTestConfig();
+      let confirmCalls = 0;
+      const io = {
+        ...createTestIo(),
+        async confirm() {
+          confirmCalls += 1;
+          return false;
+        },
+      };
+
+      const initialized = await initializeLocalSchemaCatalogOnEntry(
+        config,
+        createDatabaseStub({
+          async getAllTableSchemas() {
+            return [];
+          },
+        }),
+        io,
+      );
+
+      assert.equal(confirmCalls, 0);
+      assert.equal(initialized?.refreshed, true);
+      assert.equal(initialized?.catalog.tableCount, 0);
+      assert.equal(initialized?.result?.semanticIndexEnabled, true);
     } finally {
       if (originalHome === undefined) {
         delete process.env.HOME;
@@ -95,7 +194,7 @@ export async function registerSchemaAndToolTests(runTest: RunTest): Promise<void
 
     const stale = await assessSchemaCatalogFreshness(
       {
-        version: 5,
+        version: SCHEMA_CATALOG_VERSION,
         dialect: "postgres",
         host: "localhost",
         port: 5432,
@@ -103,19 +202,13 @@ export async function registerSchemaAndToolTests(runTest: RunTest): Promise<void
         schema: "public",
         generatedAt: new Date().toISOString(),
         tableCount: 1,
+        documentCount: 0,
+        instructionFingerprint: null,
         embeddingModelId: "embedding-model",
         tables: [
-          {
-            tableName: "users",
-            schemaHash: "stale-hash",
-            summaryText: "users table",
-            description: "Stores users.",
-            tags: ["users", "accounts", "profiles"],
-            embeddingText: "users",
-            embeddingVector: [0.1, 0.2],
-            columns: [{ name: "id", dataType: "integer", isNullable: false, defaultValue: null }],
-          },
+          createCatalogTableFixture({ schemaHash: "stale-hash" }),
         ],
+        documents: [],
       },
       db,
     );
@@ -127,17 +220,19 @@ export async function registerSchemaAndToolTests(runTest: RunTest): Promise<void
       .update(
         JSON.stringify({
           tableName: "users",
+          comment: null,
           columns: [
-            { name: "id", dataType: "integer", isNullable: false, defaultValue: null },
-            { name: "email", dataType: "text", isNullable: false, defaultValue: null },
+            { name: "id", dataType: "integer", isNullable: false, defaultValue: null, comment: null },
+            { name: "email", dataType: "text", isNullable: false, defaultValue: null, comment: null },
           ],
+          relations: [],
           ddlPreview: null,
         }),
       )
       .digest("hex");
     const fresh = await assessSchemaCatalogFreshness(
       {
-        version: 5,
+        version: SCHEMA_CATALOG_VERSION,
         dialect: "postgres",
         host: "localhost",
         port: 5432,
@@ -145,27 +240,112 @@ export async function registerSchemaAndToolTests(runTest: RunTest): Promise<void
         schema: "public",
         generatedAt: new Date().toISOString(),
         tableCount: 1,
+        documentCount: 0,
+        instructionFingerprint: null,
         embeddingModelId: "embedding-model",
         tables: [
-          {
-            tableName: "users",
+          createCatalogTableFixture({
             schemaHash: freshSchemaHash,
-            summaryText: "users table",
-            description: "Stores users.",
-            tags: ["users", "accounts", "profiles"],
-            embeddingText: "users",
-            embeddingVector: [0.1, 0.2],
             columns: [
               { name: "id", dataType: "integer", isNullable: false, defaultValue: null },
               { name: "email", dataType: "text", isNullable: false, defaultValue: null },
             ],
-          },
+          }),
         ],
+        documents: [],
       },
       db,
     );
 
     assert.equal(fresh.fresh, true);
+  });
+
+  await runTest("mysql information_schema field reader accepts uppercase metadata keys", () => {
+    assert.equal(readMySqlRowField<string>({ TABLE_NAME: "users" }, "table_name"), "users");
+    assert.equal(readMySqlRowField<string>({ table_name: "orders" }, "table_name"), "orders");
+    assert.equal(readMySqlRowField<string>({ COLUMN_COMMENT: "note" }, "column_comment"), "note");
+    assert.equal(readMySqlRowField<string>({}, "table_name"), undefined);
+  });
+
+  await runTest("schema catalog paths stay readable without hash fragments", () => {
+    const config = createTestConfig();
+    const catalogPath = getSchemaCatalogPath(config.database);
+
+    assert.match(catalogPath, /schema-catalog/i);
+    assert.match(catalogPath, /localhost-5432/i);
+    assert.match(catalogPath, /testdb/i);
+    assert.match(catalogPath, /public/i);
+    assert.match(catalogPath, /catalog\.json$/i);
+    assert.doesNotMatch(catalogPath, /[a-f0-9]{12}\.json$/i);
+  });
+
+  await runTest("mysql schema catalog paths use the public scope directory", () => {
+    const config = createTestConfig();
+    config.database.dialect = "mysql";
+    config.database.port = 3306;
+    config.database.schema = "analytics";
+
+    const catalogPath = getSchemaCatalogPath(config.database);
+
+    assert.match(catalogPath, /schema-catalog/i);
+    assert.match(catalogPath, /localhost-3306/i);
+    assert.match(catalogPath, /testdb/i);
+    assert.match(catalogPath, /catalog\.json$/i);
+    assert.match(catalogPath, /[\\/]public[\\/]catalog\.json$/i);
+    assert.doesNotMatch(catalogPath, /[\\/]analytics[\\/]catalog\.json$/i);
+    assert.doesNotMatch(catalogPath, /[\\/]default[\\/]catalog\.json$/i);
+  });
+
+  await runTest("schema catalog search indexes local table and column metadata without YAML docs", async () => {
+    const temporaryHome = await mkdtemp(path.join(os.tmpdir(), "dbchat-schema-search-"));
+    const originalHome = process.env.HOME;
+    const originalUserProfile = process.env.USERPROFILE;
+    process.env.HOME = temporaryHome;
+    process.env.USERPROFILE = temporaryHome;
+
+    try {
+      const config = createTestConfig();
+      config.embedding.apiKey = "";
+
+      const db: DatabaseAdapter = createDatabaseStub({
+        async getAllTableSchemas() {
+          return [
+            {
+              tableName: "sys_user",
+              comment: "System user table",
+              columns: [
+                { name: "id", dataType: "integer", isNullable: false, defaultValue: null },
+                { name: "username", dataType: "text", isNullable: false, defaultValue: null },
+                { name: "mobile", dataType: "text", isNullable: true, defaultValue: null },
+              ],
+              relations: [],
+            },
+          ];
+        },
+      });
+
+      const synced = await syncSchemaCatalog(config, db);
+      const search = await searchSchemaCatalog(synced.catalog, "login username", 5);
+
+      assert.equal(synced.result.semanticIndexEnabled, false);
+      assert.equal(search.matches[0]?.tableName, "sys_user");
+      assert.ok(search.matches[0]?.matchedColumns.includes("username"));
+      assert.equal(search.isAmbiguous, false);
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+
+      if (originalUserProfile === undefined) {
+        delete process.env.USERPROFILE;
+      } else {
+        process.env.USERPROFILE = originalUserProfile;
+      }
+
+      await rm(temporaryHome, { recursive: true, force: true });
+    }
   });
 
   await runTest("schema summary text hides counts unless they are explicitly provided", () => {
@@ -266,21 +446,21 @@ export async function registerSchemaAndToolTests(runTest: RunTest): Promise<void
     });
   });
 
-  await runTest("inspect_last_result payload includes returned rows and table preview", () => {
+  await runTest("inspect_last_result payload preserves requested fields beyond the first eight columns", () => {
     const serialized = serializeToolResultForModel(
       "inspect_last_result",
       {
-        sql: "select id, email from users order by id",
+        sql: "select c1, c2, c3, c4, c5, c6, c7, c8, create_time from users order by id",
         operation: "SELECT",
         rowCount: 3,
         cachedRowCount: 3,
         rowsTruncated: false,
-        fields: ["id", "email"],
+        fields: ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "create_time"],
         offset: 1,
         limit: 2,
         rows: [
-          { id: 2, email: "b@example.com" },
-          { id: 3, email: "c@example.com" },
+          { c1: 2, c2: "a", c3: "b", c4: "c", c5: "d", c6: "e", c7: "f", c8: "g", create_time: "2026-04-18 10:00:00" },
+          { c1: 3, c2: "h", c3: "i", c4: "j", c5: "k", c6: "l", c7: "m", c8: "n", create_time: "2026-04-18 09:00:00" },
         ],
       },
       createTestConfig().app,
@@ -288,16 +468,22 @@ export async function registerSchemaAndToolTests(runTest: RunTest): Promise<void
 
     const payload = JSON.parse(serialized.content) as Record<string, unknown>;
     assert.equal(payload.returnedRowCount, 2);
-    assert.equal(typeof payload.previewTable, "string");
-    assert.match(String(payload.previewTable), /b@example\.com/);
+    assert.equal(Array.isArray(payload.rows), true);
+    const rows = payload.rows as Array<Record<string, unknown>>;
+    assert.equal(rows[0]?.create_time, "2026-04-18 10:00:00");
+    assert.equal(payload.previewTable, undefined);
     assert.match(serialized.summary, /Cached result inspected/i);
   });
 
   await runTest("render_last_result returns ready-to-display plain text for one cached page", async () => {
+    const displayBlocks: Array<{ title: string; body: string }> = [];
     const result = await executeTool(
       "render_last_result",
       { offset: 0, limit: 2, columns: ["id", "email"] },
       createToolRuntimeContext({
+        pushDisplayBlock(block) {
+          displayBlocks.push({ title: block.title, body: block.body });
+        },
         getLastResult: () => ({
           sql: "select id, email from users order by id",
           operation: "SELECT",
@@ -320,12 +506,15 @@ export async function registerSchemaAndToolTests(runTest: RunTest): Promise<void
     assert.match(rendered.renderedText, /More cached rows are available/i);
     assert.equal(rendered.hasMoreRows, true);
     assert.equal(rendered.rows.length, 2);
+    assert.equal(displayBlocks.length, 1);
+    assert.equal(displayBlocks[0]?.title, "Result Preview");
+    assert.match(displayBlocks[0]?.body ?? "", /SQL result rows 1-2 of 3:/);
   });
 
   await runTest("render_last_result clamps oversized limits instead of failing validation", async () => {
     const result = await executeTool(
       "render_last_result",
-      { offset: 0, limit: 150, columns: ["id", "email"] },
+      { offset: 0, limit: 150, columns: ["id", "email"], expandPreview: true },
       createToolRuntimeContext({
         getLastResult: () => ({
           sql: "select id, email from users order by id",
@@ -354,7 +543,324 @@ export async function registerSchemaAndToolTests(runTest: RunTest): Promise<void
     assert.match(rendered.renderedText, /Requested limit 150 exceeded the per-call maximum/i);
   });
 
-  await runTest("render_last_result serializer returns plain text instead of json payload", () => {
+  await runTest("render_last_result keeps a compact preview by default when the requested limit is larger than the preview row limit", async () => {
+    const context = createToolRuntimeContext({
+      config: {
+        ...createTestConfig(),
+        app: {
+          ...createTestConfig().app,
+          tableRendering: {
+            ...createTestConfig().app.tableRendering,
+            inlineRowLimit: 5,
+            previewRowLimit: 5,
+          },
+        },
+      },
+      getLastResult: () => ({
+        sql: "select id, email from users order by id limit 8",
+        operation: "SELECT",
+        rowCount: 8,
+        rows: [
+          { id: 1, email: "a@example.com" },
+          { id: 2, email: "b@example.com" },
+          { id: 3, email: "c@example.com" },
+          { id: 4, email: "d@example.com" },
+          { id: 5, email: "e@example.com" },
+          { id: 6, email: "f@example.com" },
+          { id: 7, email: "g@example.com" },
+          { id: 8, email: "h@example.com" },
+        ],
+        rowsTruncated: false,
+        fields: ["id", "email"],
+        elapsedMs: 2,
+      }),
+    });
+    const result = await executeTool("render_last_result", { offset: 0, limit: 8, columns: ["id", "email"] }, context);
+
+    const rendered = result as { limit: number; renderedText: string; hasMoreRows: boolean; rows: Array<Record<string, unknown>> };
+    assert.equal(rendered.limit, 5);
+    assert.match(rendered.renderedText, /SQL result rows 1-5 of 8:/);
+    assert.match(rendered.renderedText, /Requested 8 visible rows, but the terminal preview stayed compact at 5 rows/i);
+    assert.equal(rendered.rows.length, 5);
+    assert.equal(rendered.hasMoreRows, true);
+  });
+
+  await runTest("render_last_result can expand beyond the configured preview row limit when explicitly requested", async () => {
+    const context = createToolRuntimeContext({
+      config: {
+        ...createTestConfig(),
+        app: {
+          ...createTestConfig().app,
+          tableRendering: {
+            ...createTestConfig().app.tableRendering,
+            inlineRowLimit: 5,
+            previewRowLimit: 5,
+          },
+        },
+      },
+      getLastResult: () => ({
+        sql: "select id, email from users order by id limit 8",
+        operation: "SELECT",
+        rowCount: 8,
+        rows: [
+          { id: 1, email: "a@example.com" },
+          { id: 2, email: "b@example.com" },
+          { id: 3, email: "c@example.com" },
+          { id: 4, email: "d@example.com" },
+          { id: 5, email: "e@example.com" },
+          { id: 6, email: "f@example.com" },
+          { id: 7, email: "g@example.com" },
+          { id: 8, email: "h@example.com" },
+        ],
+        rowsTruncated: false,
+        fields: ["id", "email"],
+        elapsedMs: 2,
+      }),
+    });
+    const result = await executeTool("render_last_result", { offset: 0, limit: 8, columns: ["id", "email"], expandPreview: true }, context);
+
+    const rendered = result as { limit: number; renderedText: string; hasMoreRows: boolean; rows: Array<Record<string, unknown>> };
+    assert.equal(rendered.limit, 8);
+    assert.match(rendered.renderedText, /SQL result rows 1-8 of 8:/);
+    assert.equal(rendered.rows.length, 8);
+    assert.equal(rendered.hasMoreRows, false);
+    assert.doesNotMatch(rendered.renderedText, /terminal preview stayed compact/i);
+  });
+
+  await runTest("render_last_result keeps the default preview limit when the executed SQL used a larger limit", async () => {
+    const context = createToolRuntimeContext({
+      config: {
+        ...createTestConfig(),
+        app: {
+          ...createTestConfig().app,
+          tableRendering: {
+            ...createTestConfig().app.tableRendering,
+            inlineRowLimit: 5,
+            previewRowLimit: 5,
+          },
+        },
+      },
+      getLastResult: () => ({
+        sql: "select id, email from users order by id limit 8",
+        operation: "SELECT",
+        rowCount: 8,
+        rows: [
+          { id: 1, email: "a@example.com" },
+          { id: 2, email: "b@example.com" },
+          { id: 3, email: "c@example.com" },
+          { id: 4, email: "d@example.com" },
+          { id: 5, email: "e@example.com" },
+          { id: 6, email: "f@example.com" },
+          { id: 7, email: "g@example.com" },
+          { id: 8, email: "h@example.com" },
+        ],
+        rowsTruncated: false,
+        fields: ["id", "email"],
+        elapsedMs: 2,
+      }),
+    });
+    const result = await executeTool("render_last_result", { offset: 0, columns: ["id", "email"] }, context);
+
+    const rendered = result as { limit: number; renderedText: string; hasMoreRows: boolean; rows: Array<Record<string, unknown>> };
+    assert.equal(rendered.limit, 5);
+    assert.match(rendered.renderedText, /SQL result rows 1-5 of 8:/);
+    assert.equal(rendered.rows.length, 5);
+    assert.equal(rendered.hasMoreRows, true);
+  });
+
+  await runTest("render_last_result formats Buffer values without exposing Node Buffer objects", async () => {
+    const result = await executeTool(
+      "render_last_result",
+      { offset: 0, limit: 1, columns: ["id", "deleted"] },
+      createToolRuntimeContext({
+        getLastResult: () => ({
+          sql: "select id, deleted from sample_records order by id limit 1",
+          operation: "SELECT",
+          rowCount: 1,
+          rows: [{ id: 1, deleted: Buffer.from([0]) }],
+          rowsTruncated: false,
+          fields: ["id", "deleted"],
+          elapsedMs: 2,
+        }),
+      }),
+    );
+
+    const rendered = result as { renderedText: string; rows: Array<Record<string, unknown>> };
+    assert.match(rendered.renderedText, /0x00/);
+    assert.doesNotMatch(rendered.renderedText, /"type":"Buffer"/);
+    assert.equal(rendered.rows[0]?.deleted, "0x00");
+  });
+
+  await runTest("render_last_result includes the automatic preview-limit note when present on the cached result", async () => {
+    const result = await executeTool(
+      "render_last_result",
+      { offset: 0, limit: 2, columns: ["id", "email"] },
+      createToolRuntimeContext({
+        getLastResult: () => ({
+          sql: "select id, email from users order by id limit 2",
+          operation: "SELECT",
+          rowCount: 2,
+          rows: [
+            { id: 1, email: "a@example.com" },
+            { id: 2, email: "b@example.com" },
+          ],
+          rowsTruncated: false,
+          fields: ["id", "email"],
+          elapsedMs: 2,
+          autoAppliedReadOnlyLimit: 2,
+        }),
+      }),
+    );
+
+    const rendered = result as { renderedText: string };
+    assert.match(rendered.renderedText, /auto-limited to 2 rows/i);
+  });
+
+  await runTest("render_last_result includes the HTML view when an artifact is attached", async () => {
+    const result = await executeTool(
+      "render_last_result",
+      { offset: 0, limit: 2, columns: ["id", "email"] },
+      createToolRuntimeContext({
+        getLastResult: () => ({
+          sql: "select id, email from users order by id",
+          operation: "SELECT",
+          rowCount: 2,
+          rows: [
+            { id: 1, email: "a@example.com" },
+            { id: 2, email: "b@example.com" },
+          ],
+          rowsTruncated: false,
+          fields: ["id", "email"],
+          elapsedMs: 2,
+          htmlArtifact: {
+            outputPath: "/tmp/dbchat/result.html",
+            fileUrl: "file:///tmp/dbchat/result.html",
+            csvOutputPath: "/tmp/dbchat/result.csv",
+            csvFileUrl: "file:///tmp/dbchat/result.csv",
+            generatedAt: "2026-04-16T00:00:00.000Z",
+            cachedRowCount: 2,
+            rowCount: 2,
+            fieldCount: 2,
+          },
+        }),
+      }),
+    );
+
+    const rendered = result as { renderedText: string };
+    assert.match(rendered.renderedText, /Open full table in a browser:/i);
+    assert.match(rendered.renderedText, /file:\/\/\/tmp\/dbchat\/result\.html/i);
+    assert.match(rendered.renderedText, /Open the same cached rows as CSV:/i);
+    assert.match(rendered.renderedText, /file:\/\/\/tmp\/dbchat\/result\.csv/i);
+  });
+
+  await runTest("render_last_result compacts very wide tables to head and tail columns by default", async () => {
+    const result = await executeTool(
+      "render_last_result",
+      { offset: 0, limit: 1 },
+      createToolRuntimeContext({
+        getLastResult: () => ({
+          sql: "select id, shop_id, open_user_id, open_user_name, open_user_phone, group_id, task_id, order_status, merchant_code, work_date, rest, create_at, update_at from schedule_info limit 1",
+          operation: "SELECT",
+          rowCount: 1,
+          rows: [
+            {
+              id: 1,
+              shop_id: 2,
+              open_user_id: "u-1",
+              open_user_name: "Alice",
+              open_user_phone: "1234567890",
+              group_id: 3,
+              task_id: "task-1",
+              order_status: 1,
+              merchant_code: "DOMINO",
+              work_date: "2026-04-16",
+              rest: false,
+              create_at: "2026-04-16 10:00:00",
+              update_at: "2026-04-16 10:05:00",
+            },
+          ],
+          rowsTruncated: false,
+          fields: [
+            "id",
+            "shop_id",
+            "open_user_id",
+            "open_user_name",
+            "open_user_phone",
+            "group_id",
+            "task_id",
+            "order_status",
+            "merchant_code",
+            "work_date",
+            "rest",
+            "create_at",
+            "update_at",
+          ],
+          elapsedMs: 2,
+        }),
+      }),
+    );
+
+    const rendered = result as { renderedText: string; fields: string[] };
+    assert.deepEqual(rendered.fields, [
+      "id",
+      "shop_id",
+      "open_user_id",
+      "open_user_name",
+      "open_user_phone",
+      "rest",
+      "create_at",
+      "update_at",
+    ]);
+    assert.match(rendered.renderedText, /Showing 8 of 13 columns in the terminal preview/i);
+    assert.match(rendered.renderedText, /create_at/);
+    assert.match(rendered.renderedText, /update_at/);
+    assert.doesNotMatch(rendered.renderedText, /\bgroup_id\b/);
+  });
+
+  await runTest("render_last_result respects the configured inline column limit by default", async () => {
+    const context = createToolRuntimeContext({
+      config: {
+        ...createTestConfig(),
+        app: {
+          ...createTestConfig().app,
+          tableRendering: {
+            ...createTestConfig().app.tableRendering,
+            inlineColumnLimit: 5,
+          },
+        },
+      },
+      getLastResult: () => ({
+        sql: "select id, title, url, icon, is_favorite, created_by, updated_by, deleted from env limit 1",
+        operation: "SELECT",
+        rowCount: 1,
+        rows: [
+          {
+            id: 1,
+            title: "home",
+            url: "https://example.com",
+            icon: "bookmark",
+            is_favorite: true,
+            created_by: "system",
+            updated_by: "system",
+            deleted: false,
+          },
+        ],
+        rowsTruncated: false,
+        fields: ["id", "title", "url", "icon", "is_favorite", "created_by", "updated_by", "deleted"],
+        elapsedMs: 2,
+      }),
+    });
+    const result = await executeTool("render_last_result", { offset: 0, limit: 1 }, context);
+
+    const rendered = result as { renderedText: string; fields: string[] };
+    assert.deepEqual(rendered.fields, ["id", "title", "created_by", "updated_by", "deleted"]);
+    assert.match(rendered.renderedText, /Showing 5 of 8 columns in the terminal preview/i);
+    assert.doesNotMatch(rendered.renderedText, /\burl\b/);
+    assert.doesNotMatch(rendered.renderedText, /\bicon\b/);
+    assert.doesNotMatch(rendered.renderedText, /\bis_favorite\b/);
+  });
+
+  await runTest("render_last_result serializer returns compact metadata while terminal rendering stays program-side", () => {
     const serialized = serializeToolResultForModel(
       "render_last_result",
       {
@@ -376,9 +882,71 @@ export async function registerSchemaAndToolTests(runTest: RunTest): Promise<void
       createTestConfig().app,
     );
 
-    assert.match(serialized.content, /SQL result rows 1-2 of 3:/);
-    assert.doesNotMatch(serialized.content, /^\{/);
+    const payload = JSON.parse(serialized.content) as Record<string, unknown>;
+    assert.equal(payload.renderedInTerminal, true);
+    assert.equal(payload.returnedRowCount, 2);
+    assert.equal(payload.hasMoreRows, true);
+    assert.equal(payload.offset, 0);
     assert.match(serialized.summary, /Cached result rendered/i);
+  });
+
+  await runTest("search_last_result can locate matching cached rows without rerunning SQL", async () => {
+    const result = await executeTool(
+      "search_last_result",
+      { query: "b@example.com", limit: 2, columns: ["email"] },
+      createToolRuntimeContext({
+        getLastResult: () => ({
+          sql: "select id, email from users order by id",
+          operation: "SELECT",
+          rowCount: 3,
+          rows: [
+            { id: 1, email: "a@example.com" },
+            { id: 2, email: "b@example.com" },
+            { id: 3, email: "c@example.com" },
+          ],
+          rowsTruncated: false,
+          fields: ["id", "email"],
+          elapsedMs: 2,
+        }),
+      }),
+    );
+
+    const searched = result as { matchedRowCount: number; rows: Array<Record<string, unknown>> };
+    assert.equal(searched.matchedRowCount, 1);
+    assert.equal(searched.rows[0]?.email, "b@example.com");
+    assert.equal(searched.rows[0]?.__rowNumber, 2);
+  });
+
+  await runTest("search_last_result serializer returns a bounded preview table", () => {
+    const serialized = serializeToolResultForModel(
+      "search_last_result",
+      {
+        sql: "select id, email from users order by id",
+        operation: "SELECT",
+        rowCount: 3,
+        cachedRowCount: 3,
+        rowsTruncated: false,
+        query: "b@example.com",
+        fields: ["email"],
+        offset: 0,
+        limit: 5,
+        matchedRowCount: 1,
+        rows: [
+          {
+            __rowNumber: 2,
+            __matchedFields: ["email"],
+            email: "b@example.com",
+          },
+        ],
+      },
+      createTestConfig().app,
+    );
+
+    const payload = JSON.parse(serialized.content) as Record<string, unknown>;
+    assert.equal(payload.matchedRowCount, 1);
+    assert.match(String(payload.previewTable), /b@example\.com/);
+    assert.match(String(payload.previewTable), /rowNumber/);
+    assert.match(serialized.summary, /Cached result search/i);
   });
 
   await runTest("inspect_last_explain returns a cached focused plan preview", async () => {
@@ -580,6 +1148,7 @@ export async function registerSchemaAndToolTests(runTest: RunTest): Promise<void
     config.app.contextCompression.largeToolOutputChars = 80;
     const pushedMessages: Array<{ role: string; content: string }> = [];
     const persistedOutputs: Array<{ id: string; content: string }> = [];
+    const displayBlocks: Array<{ title: string; body: string }> = [];
 
     const failure = await executeAgentToolCall({
       toolCall: {
@@ -591,6 +1160,9 @@ export async function registerSchemaAndToolTests(runTest: RunTest): Promise<void
         },
       },
       runtime: createToolRuntimeContext({
+        pushDisplayBlock(block) {
+          displayBlocks.push({ title: block.title, body: block.body });
+        },
         getLastResult: () => ({
           sql: "select id, email from users order by id",
           operation: "SELECT",
@@ -635,7 +1207,72 @@ export async function registerSchemaAndToolTests(runTest: RunTest): Promise<void
 
     assert.equal(failure, null);
     assert.equal(persistedOutputs.length, 0);
-    assert.match(pushedMessages[0]?.content ?? "", /SQL result rows 1-6 of 6:/);
+    const payload = JSON.parse(pushedMessages[0]?.content ?? "{}") as Record<string, unknown>;
+    assert.equal(payload.renderedInTerminal, true);
+    assert.equal(payload.returnedRowCount, 6);
+    assert.equal(displayBlocks.length, 1);
+    assert.match(displayBlocks[0]?.body ?? "", /SQL result rows 1-6 of 6:/);
+  });
+
+  await runTest("inspect_last_result stays inline even when the global large-output threshold is small", async () => {
+    const config = createTestConfig();
+    config.app.contextCompression.largeToolOutputChars = 80;
+    const pushedMessages: Array<{ role: string; content: string }> = [];
+    const persistedOutputs: Array<{ id: string; content: string }> = [];
+
+    const failure = await executeAgentToolCall({
+      toolCall: {
+        id: "call_3",
+        type: "function",
+        function: {
+          name: "inspect_last_result",
+          arguments: JSON.stringify({ offset: 0, limit: 2, columns: ["id", "email", "create_time"] }),
+        },
+      },
+      runtime: createToolRuntimeContext({
+        getLastResult: () => ({
+          sql: "select id, email, create_time from users order by create_time desc limit 2",
+          operation: "SELECT",
+          rowCount: 2,
+          rows: [
+            { id: 1, email: "a@example.com", create_time: "2026-04-18 10:00:00" },
+            { id: 2, email: "b@example.com", create_time: "2026-04-18 09:00:00" },
+          ],
+          rowsTruncated: false,
+          fields: ["id", "email", "create_time"],
+          elapsedMs: 2,
+        }),
+      }),
+      io: createTestIo(),
+      config,
+      memory: createSessionContextMemory(),
+      currentTurnId: "turn-3",
+      persistToolOutput: (entry) => {
+        const persisted = {
+          id: `tool-output-${persistedOutputs.length + 1}`,
+          turnId: "turn-3",
+          toolCallId: entry.toolCallId,
+          toolName: entry.toolName,
+          summary: entry.summary,
+          content: entry.content,
+        };
+        persistedOutputs.push(persisted);
+        return persisted;
+      },
+      pushCurrentTurnMessage(message) {
+        pushedMessages.push({
+          role: message.role,
+          content: message.role === "tool" ? message.content : "",
+        });
+      },
+      pushCurrentTurnSummary() {},
+    });
+
+    assert.equal(failure, null);
+    assert.equal(persistedOutputs.length, 0);
+    const payload = JSON.parse(pushedMessages[0]?.content ?? "{}") as Record<string, unknown>;
+    const rows = payload.rows as Array<Record<string, unknown>>;
+    assert.equal(rows[0]?.create_time, "2026-04-18 10:00:00");
   });
 
   await runTest("table DDL preview renders columns and constraints in CREATE TABLE form", () => {
@@ -667,8 +1304,11 @@ export async function registerSchemaAndToolTests(runTest: RunTest): Promise<void
             summaryText: "bookmarks",
             description: "Stores bookmark records.",
             tags: ["bookmark", "link", "save"],
+            matchedAliases: ["bookmark"],
             matchedColumns: ["user_id"],
             matchReasons: ["tag match", "column name overlap"],
+            documentKinds: ["table", "column"],
+            matchedSources: ["generated"],
             score: 82.3,
             semanticScore: 0.51,
             keywordScore: 31,
@@ -678,8 +1318,11 @@ export async function registerSchemaAndToolTests(runTest: RunTest): Promise<void
             summaryText: "tags",
             description: "Stores bookmark tags.",
             tags: ["tag", "label", "bookmark"],
+            matchedAliases: [],
             matchedColumns: ["user_id"],
             matchReasons: ["partial tag match"],
+            documentKinds: ["table"],
+            matchedSources: ["generated"],
             score: 54.1,
             semanticScore: 0.33,
             keywordScore: 21,

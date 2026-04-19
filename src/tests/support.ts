@@ -43,12 +43,19 @@ export function createTestConfig(): AppConfig {
     app: {
       resultRowLimit: 100,
       previewRowLimit: 10,
+      tempArtifactRetentionDays: 3,
+      tableRendering: {
+        inlineRowLimit: 10,
+        inlineColumnLimit: 8,
+        previewRowLimit: 10,
+      },
       contextCompression: {
         recentRawTurns: 2,
         rawHistoryChars: 7000,
         largeToolOutputChars: 2400,
         persistedToolPreviewChars: 1200,
         maxToolCallsPerTurn: 12,
+        maxAgentIterations: 24,
       },
     },
   };
@@ -109,6 +116,7 @@ export function createToolRuntimeContext(overrides: Partial<ToolRuntimeContext> 
     setLastResult() {},
     getLastExplain: () => null,
     setLastExplain() {},
+    pushDisplayBlock() {},
     history: {
       inspectTurn: () => null,
       inspectPersistedOutput: () => null,

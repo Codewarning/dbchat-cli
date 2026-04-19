@@ -4,6 +4,7 @@ import {
   cloneNormalizedStoredConfig,
   findDatabaseEntry,
   getActiveDatabaseHost,
+  isActiveDatabaseHostSelection,
   resolveNormalizedDatabaseConfig,
 } from "../config/database-hosts.js";
 import { loadNormalizedStoredConfig, saveNormalizedStoredConfig } from "../config/store.js";
@@ -92,6 +93,18 @@ function requireLiveDatabaseName(hostName: string, liveDatabaseNames: string[], 
   throw new Error(`Database '${requestedName}' is not visible on host '${hostName}'.`);
 }
 
+function findStoredDatabaseEntryByName(
+  host: NonNullable<ReturnType<typeof getActiveDatabaseHost>>,
+  requestedName: string,
+): ReturnType<typeof findDatabaseEntry> {
+  const exactMatch = findDatabaseEntry(host, requestedName);
+  if (exactMatch) {
+    return exactMatch;
+  }
+
+  return host.databases.find((database) => database.name.toLowerCase() === requestedName.toLowerCase());
+}
+
 /**
  * Load the normalized config for list-style read-only commands.
  */
@@ -147,8 +160,9 @@ export async function updateHostConfig(prompts: PromptRuntime, hostName?: string
   host.password = updated.password;
   host.ssl = updated.ssl;
 
-  if (config.activeDatabaseHost === previousName) {
+  if (isActiveDatabaseHostSelection(config, host)) {
     config.activeDatabaseHost = updated.name;
+    config.activeDatabasePort = updated.port;
   }
 
   return saveOutcome(previousConfig, config, `Host config '${previousName}' was updated.`);
@@ -170,7 +184,7 @@ export async function removeHostConfig(prompts: PromptRuntime, hostName?: string
   }
 
   config.databaseHosts = config.databaseHosts.filter((entry) => entry.name !== host.name);
-  if (config.activeDatabaseHost === host.name) {
+  if (isActiveDatabaseHostSelection(config, host)) {
     syncSelectionAfterHostRemoval(config);
   }
 
@@ -206,7 +220,7 @@ export async function addDatabaseConfig(
   ensureUniqueDatabaseName(host, databaseEntry.name);
   host.databases.push(databaseEntry);
 
-  if (config.activeDatabaseHost === host.name && !config.activeDatabaseName) {
+  if (isActiveDatabaseHostSelection(config, host) && !config.activeDatabaseName) {
     config.activeDatabaseName = databaseEntry.name;
   }
 
@@ -224,7 +238,7 @@ export async function updateDatabaseConfig(
   const config = await loadNormalizedStoredConfig();
   const previousConfig = cloneNormalizedStoredConfig(config);
   const host = await resolveInteractiveCommandHost(prompts, config, hostName, "Select a host config for the database update");
-  const defaultDatabaseName = config.activeDatabaseHost === host.name ? config.activeDatabaseName : undefined;
+  const defaultDatabaseName = isActiveDatabaseHostSelection(config, host) ? config.activeDatabaseName : undefined;
   const database = databaseName
     ? requireDatabaseEntry(host, databaseName)
     : await promptForExistingDatabase(prompts, host, "Select a database to update", defaultDatabaseName);
@@ -235,7 +249,7 @@ export async function updateDatabaseConfig(
   database.name = updated.name;
   database.schema = updated.schema;
 
-  if (config.activeDatabaseHost === host.name && config.activeDatabaseName === previousName) {
+  if (isActiveDatabaseHostSelection(config, host) && config.activeDatabaseName === previousName) {
     config.activeDatabaseName = updated.name;
   }
 
@@ -257,7 +271,7 @@ export async function removeDatabaseConfig(
     throw new Error(`Cannot remove the last database from host '${host.name}'. Remove the host config instead.`);
   }
 
-  const defaultDatabaseName = config.activeDatabaseHost === host.name ? config.activeDatabaseName : undefined;
+  const defaultDatabaseName = isActiveDatabaseHostSelection(config, host) ? config.activeDatabaseName : undefined;
   const database = databaseName
     ? requireDatabaseEntry(host, databaseName)
     : await promptForExistingDatabase(prompts, host, "Select a database to remove", defaultDatabaseName);
@@ -267,7 +281,7 @@ export async function removeDatabaseConfig(
   }
 
   host.databases = host.databases.filter((entry) => entry.name !== database.name);
-  if (config.activeDatabaseHost === host.name && config.activeDatabaseName === database.name) {
+  if (isActiveDatabaseHostSelection(config, host) && config.activeDatabaseName === database.name) {
     config.activeDatabaseName = host.databases[0]?.name;
   }
 
@@ -285,7 +299,14 @@ export async function useDatabaseConfig(
   const config = await loadNormalizedStoredConfig();
   const previousConfig = cloneNormalizedStoredConfig(config);
   const host = await resolveInteractiveCommandHost(prompts, config, hostName, "Select a host config for the database switch");
-  const defaultDatabaseName = config.activeDatabaseHost === host.name ? config.activeDatabaseName : undefined;
+  const defaultDatabaseName = isActiveDatabaseHostSelection(config, host) ? config.activeDatabaseName : undefined;
+  const storedDatabase = databaseName ? findStoredDatabaseEntryByName(host, databaseName) : undefined;
+
+  if (storedDatabase) {
+    setActiveSelection(config, host.name, storedDatabase.name);
+    return saveOutcome(previousConfig, config, `Active database switched to '${storedDatabase.name}' under host '${host.name}'.`);
+  }
+
   const liveDatabaseNames = await listLiveDatabaseNamesForHost(host, defaultDatabaseName);
   const selectedDatabaseName = databaseName
     ? requireLiveDatabaseName(host.name, liveDatabaseNames, databaseName)

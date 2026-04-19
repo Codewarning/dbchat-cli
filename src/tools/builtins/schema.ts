@@ -41,7 +41,7 @@ async function loadReadySchemaCatalog(context: ToolRuntimeContext): Promise<Sche
     return context.schemaCatalogCache;
   }
 
-  const { catalog } = await ensureLocalSchemaCatalogReady(context.config, context.db, context.io);
+  const { catalog } = await ensureLocalSchemaCatalogReady(context.config, context.io);
   context.schemaCatalogCache = catalog;
   return catalog;
 }
@@ -165,11 +165,17 @@ export const searchSchemaCatalogTool = defineTool(
     const payload = {
       query: search.query,
       totalMatches: search.totalMatches,
+      isAmbiguous: search.isAmbiguous,
+      ambiguityReason: search.ambiguityReason,
+      clarificationCandidates: search.clarificationCandidates,
       topMatches: search.matches.slice(0, 5).map((match) => ({
         tableName: match.tableName,
         description: clipText(match.description, 120),
         tags: match.tags.slice(0, 5),
+        matchedAliases: match.matchedAliases.slice(0, 5),
         matchedColumns: match.matchedColumns.slice(0, 5),
+        documentKinds: match.documentKinds.slice(0, 5),
+        matchedSources: match.matchedSources.slice(0, 5),
         matchReasons: match.matchReasons.slice(0, 5),
         score: match.score,
         keywordScore: match.keywordScore,
@@ -179,10 +185,13 @@ export const searchSchemaCatalogTool = defineTool(
       omittedMatchCount: omittedCount,
     };
     const previewSummary = items.length ? ` Top matches: ${items.join(", ")}${omittedCount ? ` (+${omittedCount} more)` : ""}` : "";
+    const ambiguitySummary = search.isAmbiguous && search.clarificationCandidates.length
+      ? ` Ambiguous candidates: ${search.clarificationCandidates.join(", ")}. Clarify with the user before assuming one exact table.`
+      : "";
 
     return {
       content: stringifyCompact(payload),
-      summary: `Schema catalog search: ${search.totalMatches} matches for "${clipText(search.query, 80)}".${previewSummary}`,
+      summary: `Schema catalog search: ${search.totalMatches} matches for "${clipText(search.query, 80)}".${previewSummary}${ambiguitySummary}`,
     };
   },
 );

@@ -6,6 +6,7 @@ import { findDatabaseEntry, findDatabaseHostByConnection } from "../config/datab
 import { loadNormalizedStoredConfig } from "../config/store.js";
 import type { AgentIO, DatabaseOperationAccess, PlanItem } from "../types/index.js";
 import { buildSelectOrInputChoices, type PromptRuntime, type SelectChoice } from "../ui/prompts.js";
+import { buildResultArtifactDisplayText } from "../ui/result-artifacts.js";
 import { selectNextComposerHistoryEntry, selectPreviousComposerHistoryEntry } from "./input-history.js";
 import {
   createUiId,
@@ -517,6 +518,22 @@ export function useChatController({ state, io, clearScreen }: UseChatControllerA
     const result = await session.run(input);
     setPlanItems(result.plan);
     appendEntry({ title: "Assistant", body: result.content, tone: "assistant" });
+    result.displayBlocks.forEach((block) => {
+      appendEntry({
+        title: block.title,
+        body: block.body,
+        tone: "assistant",
+        meta: block.table
+          ? {
+              table: block.table,
+            }
+          : undefined,
+      });
+    });
+    const artifactDisplay = buildResultArtifactDisplayText(result.lastResult?.htmlArtifact);
+    if (artifactDisplay) {
+      appendEntry({ title: "Artifacts", body: artifactDisplay, tone: "info" });
+    }
   };
 
   const runSlashCommand = async (line: string) => {

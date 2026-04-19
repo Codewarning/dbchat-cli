@@ -1,5 +1,6 @@
 // Small terminal logger that supports timestamped lines and transient loading updates.
 import process from "node:process";
+import { formatArtifactLineForTerminal } from "./terminal-links.js";
 
 /**
  * Control handle for a long-running loading indicator.
@@ -60,7 +61,7 @@ function colorize(text: string, tone: LogTone, bold = false): string {
  * Infer a color tone for single-line log messages based on message content.
  */
 function inferMessageTone(message: string): LogTone {
-  if (/(failed|error|rejected|cancelled)/i.test(message)) {
+  if (/(failed|error|rejected|cancelled|blocked)/i.test(message)) {
     return "error";
   }
 
@@ -135,7 +136,7 @@ export class TerminalLogger {
       return true;
     }
 
-    return /(final answer|warning|warnings|failed|error)/i.test(title);
+    return /(final answer|result preview|artifacts|warning|warnings|failed|error)/i.test(title);
   }
 
   /**
@@ -159,6 +160,12 @@ export class TerminalLogger {
     }
 
     this.clearTransient();
+    const formattedArtifactLine = formatArtifactLineForTerminal(message);
+    if (formattedArtifactLine) {
+      console.log(formattedArtifactLine);
+      return;
+    }
+
     console.log(colorize(message, inferMessageTone(message)));
   }
 
@@ -175,6 +182,12 @@ export class TerminalLogger {
     this.clearTransient();
     console.log(colorize(title, tone, true));
     for (const line of body.split("\n")) {
+      const formattedArtifactLine = formatArtifactLineForTerminal(line, { prefix: "  " });
+      if (formattedArtifactLine) {
+        console.log(formattedArtifactLine);
+        continue;
+      }
+
       console.log(colorize(`  ${line}`, tone === "warning" || tone === "error" ? tone : "muted"));
     }
   }

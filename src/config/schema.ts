@@ -63,17 +63,28 @@ export const contextCompressionConfigSchema = z.object({
   largeToolOutputChars: z.number().int().positive(),
   persistedToolPreviewChars: z.number().int().positive(),
   maxToolCallsPerTurn: z.number().int().positive(),
+  maxAgentIterations: z.number().int().positive(),
+});
+
+export const tableRenderingConfigSchema = z.object({
+  inlineRowLimit: z.number().int().positive(),
+  inlineColumnLimit: z.number().int().positive(),
+  previewRowLimit: z.number().int().positive(),
 });
 
 export const appRuntimeConfigSchema = z.object({
   resultRowLimit: z.number().int().positive(),
   previewRowLimit: z.number().int().positive(),
+  tempArtifactRetentionDays: z.number().int().positive(),
+  tableRendering: tableRenderingConfigSchema,
   contextCompression: contextCompressionConfigSchema,
 });
 
 export const storedAppRuntimeConfigSchema = z.object({
   resultRowLimit: z.number().int().positive().optional(),
   previewRowLimit: z.number().int().positive().optional(),
+  tempArtifactRetentionDays: z.number().int().positive().optional(),
+  tableRendering: tableRenderingConfigSchema.partial().optional(),
   contextCompression: contextCompressionConfigSchema.partial().optional(),
 });
 
@@ -82,6 +93,7 @@ export const storedConfigSchema = z.object({
   embedding: embeddingConfigSchema.partial().optional(),
   databaseHosts: z.array(storedDatabaseHostSchema).optional(),
   activeDatabaseHost: z.string().min(1).optional(),
+  activeDatabasePort: z.number().int().positive().optional(),
   activeDatabaseName: z.string().min(1).optional(),
   app: storedAppRuntimeConfigSchema.optional(),
 });

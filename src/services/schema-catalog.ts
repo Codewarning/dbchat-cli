@@ -1,7 +1,6 @@
 import type { DatabaseAdapter } from "../db/adapter.js";
 import { ensureSchemaCatalogReady as ensureRuntimeSchemaCatalogReady, initializeSchemaCatalogOnEntry, searchSchemaCatalog, syncSchemaCatalog } from "../schema/catalog.js";
 import type { AgentIO, AppConfig, SchemaCatalog, SchemaCatalogSearchResult, SchemaCatalogSyncResult } from "../types/index.js";
-import { confirmRemoteDataTransfer } from "./remote-data-consent.js";
 
 export interface ReadySchemaCatalogResult {
   catalog: SchemaCatalog;
@@ -20,7 +19,7 @@ export async function refreshLocalSchemaCatalog(
   io.log("Refreshing local schema catalog");
   const synced = await io.withLoading("Refreshing schema catalog", () => syncSchemaCatalog(config, db, io));
   io.log(
-    `Schema catalog ready: ${synced.result.tableCount} tables, +${synced.result.addedTables.length} added, ~${synced.result.updatedTables.length} updated, -${synced.result.removedTables.length} removed`,
+    `Schema catalog ready: ${synced.result.tableCount} tables, ${synced.result.documentCount} documents, +${synced.result.addedTables.length} added, ~${synced.result.updatedTables.length} updated, -${synced.result.removedTables.length} removed`,
   );
   return synced;
 }
@@ -30,10 +29,9 @@ export async function refreshLocalSchemaCatalog(
  */
 export async function ensureLocalSchemaCatalogReady(
   config: AppConfig,
-  db: DatabaseAdapter,
   io: AgentIO,
 ): Promise<ReadySchemaCatalogResult> {
-  return ensureRuntimeSchemaCatalogReady(config, db, io);
+  return ensureRuntimeSchemaCatalogReady(config, io);
 }
 
 /**
@@ -45,16 +43,10 @@ export async function initializeLocalSchemaCatalogOnEntry(
   io: AgentIO,
 ): Promise<ReadySchemaCatalogResult | null> {
   try {
-    return await ensureRuntimeSchemaCatalogReady(config, db, io);
+    return await ensureRuntimeSchemaCatalogReady(config, io);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     io.log(message);
-  }
-
-  const approved = await confirmRemoteDataTransfer(io, "catalog_sync");
-  if (!approved) {
-    io.log("Skipped local schema catalog initialization. Run `dbchat catalog sync` later if you need schema search tools.");
-    return null;
   }
 
   try {
@@ -70,12 +62,12 @@ export async function initializeLocalSchemaCatalogOnEntry(
  * Search one already-loaded schema catalog with the same ranking used by tools.
  */
 export async function searchLocalSchemaCatalog(
-  config: AppConfig,
+  _config: AppConfig,
   catalog: SchemaCatalog,
   query: string,
   limit: number,
 ): Promise<SchemaCatalogSearchResult> {
-  return searchSchemaCatalog(catalog, config.embedding, query, limit);
+  return searchSchemaCatalog(catalog, query, limit);
 }
 
 /**
@@ -83,12 +75,11 @@ export async function searchLocalSchemaCatalog(
  */
 export async function searchReadyLocalSchemaCatalog(
   config: AppConfig,
-  db: DatabaseAdapter,
   io: AgentIO,
   query: string,
   limit: number,
 ): Promise<ReadySchemaCatalogResult & { search: SchemaCatalogSearchResult }> {
-  const ready = await ensureLocalSchemaCatalogReady(config, db, io);
+  const ready = await ensureLocalSchemaCatalogReady(config, io);
   return {
     ...ready,
     search: await searchLocalSchemaCatalog(config, ready.catalog, query, limit),

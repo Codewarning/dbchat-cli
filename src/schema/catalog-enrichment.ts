@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { LlmConfig, TableSchema } from "../types/index.js";
 import { LlmClient } from "../llm/client.js";
 import type { LlmMessageParam } from "../llm/types.js";
+import { buildLocalSearchTags } from "./catalog-tokens.js";
 
 export const TABLE_ANALYSIS_BATCH_SIZE = 12;
 
@@ -88,13 +89,15 @@ function buildTableAnalysisPrompt(table: TableSchema): string {
     .map((column) => {
       const nullable = column.isNullable ? "nullable" : "not null";
       const defaultValue = column.defaultValue ? ` default=${String(column.defaultValue).replace(/\s+/g, " ").trim()}` : "";
-      return `- ${column.name}: ${column.dataType}, ${nullable}${defaultValue}`;
+      const comment = column.comment ? ` comment=${column.comment.replace(/\s+/g, " ").trim()}` : "";
+      return `- ${column.name}: ${column.dataType}, ${nullable}${defaultValue}${comment}`;
     })
     .join("\n");
 
   return [
     `Analyze this database table for semantic search.`,
     `Table name: ${table.tableName}`,
+    table.comment ? `Table comment: ${table.comment}` : "",
     `Columns:`,
     columnPreview,
     ``,
@@ -118,16 +121,53 @@ export interface TableSearchMetadataWithName extends TableSearchMetadata {
   tableName: string;
 }
 
-export function buildTableEmbeddingText(table: TableSchema, metadata: TableSearchMetadata): string {
+function buildFallbackMetadata(table: TableSchema): TableSearchMetadata {
+  const tags = buildLocalSearchTags([
+    table.tableName,
+    table.comment ?? "",
+    ...table.columns.flatMap((column) => [column.name, column.comment ?? ""]),
+  ]);
+
+  return {
+    description: table.comment?.trim() || `Table ${table.tableName} with ${table.columns.length} columns.`,
+    tags: (tags.length >= 3 ? tags : [...tags, "table", "schema", table.tableName.toLowerCase()]).slice(0, 8),
+  };
+}
+
+export function buildTableEmbeddingText(table: {
+  tableName: string;
+  description: string;
+  tags: string[];
+  columns: TableSchema["columns"];
+  instructionContext?: string;
+  dbComment?: string | null;
+  businessName?: string;
+  aliases?: string[];
+  examples?: string[];
+  relations?: Array<{ toTable: string; type: string; description?: string; fromColumns: string[]; toColumns?: string[] }>;
+}): string {
   const columnNames = table.columns.map((column) => column.name).join(", ");
   const columnTypes = table.columns.map((column) => `${column.name}:${column.dataType}`).join(", ");
   return [
     `table ${table.tableName}`,
-    `description ${metadata.description}`,
-    `tags ${metadata.tags.join(", ")}`,
+    table.businessName ? `business-name ${table.businessName}` : "",
+    table.dbComment ? `table-comment ${table.dbComment}` : "",
+    `description ${table.description}`,
+    `tags ${table.tags.join(", ")}`,
+    table.instructionContext ? `scoped-notes ${table.instructionContext}` : "",
+    table.aliases?.length ? `aliases ${table.aliases.join(", ")}` : "",
     `columns ${columnNames}`,
     `column-types ${columnTypes}`,
-  ].join("\n");
+    table.columns.some((column) => column.comment || column.description)
+      ? `column-notes ${table.columns.flatMap((column) => [column.comment ?? "", column.description ?? "", ...(column.aliases ?? [])]).filter(Boolean).join(", ")}`
+      : "",
+    table.relations?.length
+      ? `relations ${table.relations.map((relation) => `${relation.type}:${relation.fromColumns.join("|")}=>${relation.toTable}${relation.toColumns?.length ? `(${relation.toColumns.join("|")})` : ""}`).join(", ")}`
+      : "",
+    table.examples?.length ? `examples ${table.examples.join("; ")}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function buildTableAnalysisMessages(tables: TableSchema[]): LlmMessageParam[] {
@@ -151,11 +191,12 @@ function buildBatchTableAnalysisPrompt(tables: TableSchema[]): string {
         .map((column) => {
           const nullable = column.isNullable ? "nullable" : "not null";
           const defaultValue = column.defaultValue ? ` default=${String(column.defaultValue).replace(/\s+/g, " ").trim()}` : "";
-          return `- ${column.name}: ${column.dataType}, ${nullable}${defaultValue}`;
+          const comment = column.comment ? ` comment=${column.comment.replace(/\s+/g, " ").trim()}` : "";
+          return `- ${column.name}: ${column.dataType}, ${nullable}${defaultValue}${comment}`;
         })
         .join("\n");
 
-      return [`Table name: ${table.tableName}`, "Columns:", columns].join("\n");
+      return [`Table name: ${table.tableName}`, table.comment ? `Table comment: ${table.comment}` : "", "Columns:", columns].filter(Boolean).join("\n");
     })
     .join("\n\n");
 
@@ -195,6 +236,10 @@ export async function analyzeTableBatchForSearch(
 ): Promise<Map<string, TableSearchMetadata>> {
   if (!tables.length) {
     return new Map();
+  }
+
+  if (!llmConfig.apiKey.trim()) {
+    return new Map(tables.map((table) => [table.tableName, buildFallbackMetadata(table)]));
   }
 
   const client = new LlmClient(llmConfig);

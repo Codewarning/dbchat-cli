@@ -1,23 +1,15 @@
 import { z } from "zod";
-import { assessSqlSafety } from "../../db/safety.js";
+import { assessSqlSafety, hasExplicitRowLimit, splitSqlStatements } from "../../db/safety.js";
 import { executeManagedSql, explainSql } from "../../services/sql.js";
-import type { AppRuntimeConfig, QueryExecutionResult, QueryPlanResult, SchemaCatalogSyncResult } from "../../types/index.js";
-import {
-  buildPlanPreview,
-  buildPreviewTable,
-  clipMiddle,
-  clipText,
-  compactValue,
-  isRecord,
-  stringifyCompact,
-} from "../serialize-helpers.js";
+import type { QueryExecutionResult, QueryPlanResult, SchemaCatalogSyncResult } from "../../types/index.js";
+import { buildPlanPreview, clipMiddle, clipText, isRecord, stringifyCompact } from "../serialize-helpers.js";
 import { defineTool } from "../specs.js";
 
-const MAX_MODEL_PREVIEW_ROWS = 3;
 const MAX_MODEL_PREVIEW_FIELDS = 8;
-const MAX_MODEL_TABLE_PREVIEW_FIELDS = 6;
 const MAX_SQL_CHARS = 800;
 const MAX_MODEL_PLAN_PREVIEW_CHARS = 1200;
+const FULL_RESULT_REASON_PATTERN =
+  /\ball\b|\bevery\b|\bfull\b|\bcomplete\b|\bentire\b|\bexport\b|\bcsv\b|\bjson\b|\u5168\u90e8|\u6240\u6709|\u5168\u91cf|\u5b8c\u6574|\u5bfc\u51fa|\u4e0b\u8f7d/iu;
 
 const runSqlSchema = z.object({
   sql: z.string().min(1),
@@ -28,14 +20,49 @@ const explainSqlSchema = z.object({
   sql: z.string().min(1),
 });
 
-function projectRowsForModel(
-  rows: Record<string, unknown>[],
-  fields: string[],
-  previewLimit: number,
-): Record<string, unknown>[] {
-  return rows.slice(0, previewLimit).map((row) =>
-    Object.fromEntries(fields.map((field) => [field, compactValue(row[field])])) as Record<string, unknown>,
-  );
+function shouldSkipAutomaticReadOnlyLimit(reason: string): boolean {
+  return FULL_RESULT_REASON_PATTERN.test(reason);
+}
+
+function buildSqlWithReadOnlyLimit(sql: string, limit: number): string {
+  const statement = splitSqlStatements(sql)[0] ?? sql.trim();
+  return `${statement.replace(/;\s*$/u, "").trimEnd()}\nLIMIT ${limit}`;
+}
+
+function maybeApplyAutomaticReadOnlyLimit(sql: string, reason: string, previewRowLimit: number): {
+  sql: string;
+  autoAppliedReadOnlyLimit?: number;
+} {
+  const normalizedLimit =
+    Number.isFinite(previewRowLimit) && previewRowLimit > 0
+      ? Math.max(1, Math.floor(previewRowLimit))
+      : null;
+  if (!normalizedLimit) {
+    return { sql };
+  }
+
+  const safety = assessSqlSafety(sql);
+  if (safety.operation !== "SELECT") {
+    return { sql };
+  }
+
+  if (hasExplicitRowLimit(sql)) {
+    return { sql };
+  }
+
+  const normalizedSql = sql.replace(/\s+/g, " ").trim();
+  if (/\boffset\b/iu.test(normalizedSql) || /\bfor\s+(?:update|share)\b/iu.test(normalizedSql)) {
+    return { sql };
+  }
+
+  if (shouldSkipAutomaticReadOnlyLimit(reason)) {
+    return { sql };
+  }
+
+  return {
+    sql: buildSqlWithReadOnlyLimit(sql, normalizedLimit),
+    autoAppliedReadOnlyLimit: normalizedLimit,
+  };
 }
 
 function serializeQueryResultForModel(
@@ -43,22 +70,17 @@ function serializeQueryResultForModel(
     status?: string;
     reason?: string;
     previewRows?: Record<string, unknown>[];
+    autoAppliedReadOnlyLimit?: number;
     catalogRefresh?: {
       status?: string;
       reason?: string;
       result?: SchemaCatalogSyncResult;
       error?: string;
-    };
+      };
   },
-  appConfig: AppRuntimeConfig,
 ) {
-  const previewLimit = Math.min(appConfig.previewRowLimit, MAX_MODEL_PREVIEW_ROWS);
   const previewFields = result.fields.slice(0, MAX_MODEL_PREVIEW_FIELDS);
   const omittedFieldCount = Math.max(0, result.fields.length - previewFields.length);
-  const previewSource = Array.isArray(result.previewRows) ? result.previewRows : result.rows;
-  const previewRows = projectRowsForModel(previewSource, previewFields, previewLimit);
-  const previewTable =
-    previewFields.length <= MAX_MODEL_TABLE_PREVIEW_FIELDS ? buildPreviewTable(previewRows, previewFields) : undefined;
   const catalogRefresh =
     isRecord(result.catalogRefresh) && result.catalogRefresh.status !== "not_needed"
       ? {
@@ -86,9 +108,8 @@ function serializeQueryResultForModel(
     fields: previewFields,
     omittedFieldCount,
     elapsedMs: result.elapsedMs,
-    previewRows,
-    previewTable,
-    previewTruncated: result.rowCount > previewRows.length,
+    previewAvailable: result.rowCount > 0,
+    autoAppliedReadOnlyLimit: typeof result.autoAppliedReadOnlyLimit === "number" ? result.autoAppliedReadOnlyLimit : undefined,
     catalogRefresh,
   };
 
@@ -96,13 +117,17 @@ function serializeQueryResultForModel(
     ? ` Fields: ${previewFields.join(", ")}${omittedFieldCount ? ` (+${omittedFieldCount} more)` : ""}.`
     : "";
   const truncationSummary = result.rowsTruncated ? ` Cached rows were limited to ${result.rows.length}.` : "";
+  const automaticLimitSummary =
+    typeof result.autoAppliedReadOnlyLimit === "number"
+      ? ` A default LIMIT ${result.autoAppliedReadOnlyLimit} was added because the query had no explicit row bound.`
+      : "";
   const catalogRefreshSummary =
     catalogRefresh?.status === "manual_required"
       ? " Schema catalog was not refreshed automatically after the schema change. Run `dbchat catalog sync` manually before relying on schema search results."
       : "";
   return {
     content: stringifyCompact(payload),
-    summary: `SQL ${payload.status}: ${payload.operation} returned ${payload.rowCount} rows in ${payload.elapsedMs.toFixed(2)}ms.${fieldSummary}${truncationSummary}${catalogRefreshSummary}`,
+    summary: `SQL ${payload.status}: ${payload.operation} returned ${payload.rowCount} rows in ${payload.elapsedMs.toFixed(2)}ms.${fieldSummary}${truncationSummary}${automaticLimitSummary}${catalogRefreshSummary}`,
   };
 }
 
@@ -176,10 +201,16 @@ export const runSqlTool = defineTool(
   },
   runSqlSchema,
   async (args, context) => {
+    const normalizedSql = maybeApplyAutomaticReadOnlyLimit(args.sql, args.reason, context.config.app.previewRowLimit);
     context.io.log(`SQL reason: ${args.reason}`);
-    context.io.logBlock("SQL to execute", args.sql);
+    if (typeof normalizedSql.autoAppliedReadOnlyLimit === "number") {
+      context.io.log(
+        `Applied default LIMIT ${normalizedSql.autoAppliedReadOnlyLimit} to this read-only SELECT because it had no explicit row bound.`,
+      );
+    }
+    context.io.logBlock("SQL to execute", normalizedSql.sql);
 
-    const safety = assessSqlSafety(args.sql);
+    const safety = assessSqlSafety(normalizedSql.sql);
     if (safety.warnings.length) {
       context.io.logBlock("SQL warnings", safety.warnings.join("\n"));
     }
@@ -188,14 +219,20 @@ export const runSqlTool = defineTool(
       config: context.config,
       db: context.db,
       io: context.io,
-      sql: args.sql,
+      sql: normalizedSql.sql,
       approvalState: context.mutationApproval,
     });
     if (execution.status === "cancelled") {
       return execution;
     }
 
-    const result = execution.result;
+    const result =
+      typeof normalizedSql.autoAppliedReadOnlyLimit === "number"
+        ? {
+            ...execution.result,
+            autoAppliedReadOnlyLimit: normalizedSql.autoAppliedReadOnlyLimit,
+          }
+        : execution.result;
     if (execution.catalogRefresh.status === "manual_required") {
       context.schemaCatalogCache = null;
     }
@@ -212,7 +249,7 @@ export const runSqlTool = defineTool(
       previewRows: result.rows.slice(0, context.config.app.previewRowLimit),
     };
   },
-  (result, appConfig) => {
+  (result, _appConfig) => {
     if (isRecord(result) && result.status === "cancelled") {
       return serializeCancelledSqlResult(result);
     }
@@ -223,7 +260,6 @@ export const runSqlTool = defineTool(
         reason?: string;
         previewRows?: Record<string, unknown>[];
       },
-      appConfig,
     );
   },
 );

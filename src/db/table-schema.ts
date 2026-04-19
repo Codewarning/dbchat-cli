@@ -1,4 +1,4 @@
-import type { TableColumn, TableDdlSource, TableSchema } from "../types/index.js";
+import type { TableColumn, TableDdlSource, TableRelation, TableSchema } from "../types/index.js";
 import { buildCreateTableDdl } from "../schema/table-ddl.js";
 
 export interface TableConstraintDefinition {
@@ -29,11 +29,15 @@ export function buildTableSchema(
   constraints: TableConstraintDefinition[] = [],
   ddlPreview = buildCreateTableDdl(tableName, columns, buildConstraintDdlLines(constraints)),
   ddlSource: TableDdlSource = "reconstructed",
+  comment?: string | null,
+  relations: TableRelation[] = [],
 ): TableSchema {
   return {
     tableName,
     columns,
     ddlPreview,
     ddlSource,
+    comment,
+    relations,
   };
 }

@@ -17,6 +17,10 @@ function getDefaultPortForDialect(dialect: DatabaseDialect): number {
   return dialect === "postgres" ? DEFAULT_POSTGRES_PORT : DEFAULT_MYSQL_PORT;
 }
 
+function getDefaultUsernameForDialect(dialect: DatabaseDialect): string {
+  return dialect === "postgres" ? "postgres" : "root";
+}
+
 /**
  * Build one runtime connection config from a stored host plus one seed database entry.
  */
@@ -169,11 +173,13 @@ export function syncSelectionAfterHostRemoval(config: NormalizedStoredConfig): v
   const fallbackHost = config.databaseHosts[0];
   if (!fallbackHost) {
     config.activeDatabaseHost = undefined;
+    config.activeDatabasePort = undefined;
     config.activeDatabaseName = undefined;
     return;
   }
 
   config.activeDatabaseHost = fallbackHost.name;
+  config.activeDatabasePort = fallbackHost.port;
   config.activeDatabaseName = fallbackHost.databases[0]?.name;
 }
 
@@ -189,7 +195,7 @@ export function printDatabaseConfigList(config: NormalizedStoredConfig): void {
   const rows = buildDatabaseConfigRows(config);
 
   console.table(rows);
-  console.log(`Active host: ${config.activeDatabaseHost ?? "(none)"}`);
+  console.log(`Active host: ${config.activeDatabaseHost ? `${config.activeDatabaseHost}:${config.activeDatabasePort ?? "?"}` : "(none)"}`);
   console.log(`Active database: ${config.activeDatabaseName ?? "(none)"}`);
 }
 
@@ -229,7 +235,7 @@ async function promptForExistingHost(
       label: `${host.name} (${host.dialect} ${host.host}:${host.port})`,
       value: host.name,
     })),
-    config.activeDatabaseHost,
+    getActiveDatabaseHost(config)?.name,
   );
 
   return requireDatabaseHost(config, selectedHostName);
@@ -345,7 +351,9 @@ export async function promptDatabaseHostConfig(
     existing?.dialect ?? "postgres",
   );
   const defaultPort = String(getDefaultPortForDialect(dialect));
-  const currentPort = existing?.port ? String(existing.port) : undefined;
+  const dialectMatchesExisting = existing?.dialect === dialect;
+  const currentPort = dialectMatchesExisting && existing?.port ? String(existing.port) : undefined;
+  const defaultUsername = dialectMatchesExisting && existing?.username ? existing.username : getDefaultUsernameForDialect(dialect);
 
   return {
     name: requireNonEmpty(await prompts.input("Host config name", existing?.name ?? ""), "Host config name"),
@@ -358,10 +366,10 @@ export async function promptDatabaseHostConfig(
         currentPort ?? defaultPort,
         "Enter a custom database port",
         "Custom port",
-      ),
+        ),
       "Database port",
     ),
-    username: requireNonEmpty(await prompts.input("Database username", existing?.username ?? ""), "Database username"),
+    username: requireNonEmpty(await prompts.input("Database username", defaultUsername), "Database username"),
     password: requireNonEmpty((await prompts.password("Database password")) || existing?.password || "", "Database password"),
     ssl: await prompts.confirm("Enable SSL?", existing?.ssl ?? false),
   };

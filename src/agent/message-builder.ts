@@ -46,6 +46,7 @@ export function buildSessionMessages(
   completedTurns: ConversationTurn[],
   currentTurn: ConversationTurn | null,
   currentInput: string,
+  scopedInstructionText?: string | null,
 ): LlmMessageParam[] {
   const contextProfile = buildContextPromptProfile(currentInput, {
     hasPlan: plan.length > 0,
@@ -61,6 +62,13 @@ export function buildSessionMessages(
       content: buildSystemPrompt(config),
     },
   ];
+
+  if (scopedInstructionText?.trim()) {
+    messages.push({
+      role: "system",
+      content: scopedInstructionText,
+    });
+  }
 
   const contextPrompt = buildContextPrompt(plan, lastResult, memory, contextProfile);
   if (contextPrompt) {

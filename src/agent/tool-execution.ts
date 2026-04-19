@@ -55,7 +55,7 @@ function clipStructuredText(value: string, maxChars: number): string {
 }
 
 function shouldAlwaysInlineToolResult(toolName: string): boolean {
-  return toolName === "render_last_result";
+  return toolName === "render_last_result" || toolName === "inspect_last_result";
 }
 
 function buildModelVisibleToolContent(options: {

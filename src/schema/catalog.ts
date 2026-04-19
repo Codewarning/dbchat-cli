@@ -1,6 +1,7 @@
 export {
   getSchemaCatalogDirectory,
   getSchemaCatalogPath,
+  getSchemaCatalogScopeDirectory,
   loadSchemaCatalog,
   saveSchemaCatalog,
 } from "./catalog-storage.js";

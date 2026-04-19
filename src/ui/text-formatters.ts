@@ -24,7 +24,7 @@ export function formatDatabaseConfigListText(config: NormalizedStoredConfig): st
       "schema",
       "ssl",
     ]),
-    `Active host: ${config.activeDatabaseHost ?? "(none)"}`,
+    `Active host: ${config.activeDatabaseHost ? `${config.activeDatabaseHost}:${config.activeDatabasePort ?? "?"}` : "(none)"}`,
     `Active database: ${config.activeDatabaseName ?? "(none)"}`,
   ].join("\n");
 }

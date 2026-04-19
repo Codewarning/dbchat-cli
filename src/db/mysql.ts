@@ -2,7 +2,7 @@
 import { performance } from "node:perf_hooks";
 import mysql from "mysql2/promise";
 import type { ResultSetHeader, RowDataPacket } from "mysql2";
-import type { DatabaseConfig, QueryExecutionResult, QueryPlanResult, SchemaSummary, TableColumn, TableSchema } from "../types/index.js";
+import type { DatabaseConfig, QueryExecutionResult, QueryPlanResult, SchemaSummary, TableColumn, TableRelation, TableSchema } from "../types/index.js";
 import { buildTableSchema, type TableConstraintDefinition } from "./table-schema.js";
 import { assessSqlSafety, inferSqlOperation } from "./safety.js";
 import type { DatabaseAdapter, SchemaSummaryOptions } from "./adapter.js";
@@ -24,11 +24,13 @@ interface DatabaseRow extends RowDataPacket {
 
 interface ColumnRow extends RowDataPacket {
   table_name?: string;
+  table_comment?: string | null;
   column_name: string;
   data_type: string;
   is_nullable: "YES" | "NO";
   column_default: string | null;
   extra?: string | null;
+  column_comment?: string | null;
 }
 
 interface ConstraintRow extends RowDataPacket {
@@ -42,6 +44,27 @@ interface ShowCreateTableRow extends RowDataPacket {
   [key: string]: unknown;
 }
 
+interface ForeignKeyRow extends RowDataPacket {
+  table_name: string;
+  referenced_table_name: string;
+  fk_columns: string;
+  referenced_columns: string;
+}
+
+export function readMySqlRowField<T>(row: Partial<Record<string, unknown>>, fieldName: string): T | undefined {
+  const direct = row[fieldName];
+  if (direct !== undefined) {
+    return direct as T;
+  }
+
+  const upperCase = row[fieldName.toUpperCase()];
+  if (upperCase !== undefined) {
+    return upperCase as T;
+  }
+
+  return undefined;
+}
+
 function quoteMySqlIdentifier(value: string): string {
   return `\`${value.replace(/`/g, "``")}\``;
 }
@@ -50,12 +73,43 @@ function quoteMySqlLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+export function normalizeMySqlExplainPlan(rawPlan: unknown): unknown {
+  if (typeof rawPlan !== "string") {
+    return rawPlan;
+  }
+
+  try {
+    return JSON.parse(rawPlan) as unknown;
+  } catch {
+    return rawPlan;
+  }
+}
+
+function castMySqlField(
+  field: { type: string; length: number; buffer: () => Buffer | null },
+  next: () => unknown,
+): unknown {
+  if (field.type === "BIT" && field.length === 1) {
+    const value = field.buffer();
+    if (!value || !value.length) {
+      return false;
+    }
+
+    return value[0] !== 0;
+  }
+
+  return next();
+}
+
 function toTableColumn(row: ColumnRow): TableColumn {
+  const dataType = readMySqlRowField<string>(row, "data_type") ?? "";
+  const extra = readMySqlRowField<string | null>(row, "extra");
   return {
-    name: row.column_name,
-    dataType: row.extra?.toLowerCase().includes("auto_increment") ? `${row.data_type} AUTO_INCREMENT` : row.data_type,
-    isNullable: row.is_nullable === "YES",
-    defaultValue: row.column_default,
+    name: readMySqlRowField<string>(row, "column_name") ?? "",
+    dataType: extra?.toLowerCase().includes("auto_increment") ? `${dataType} AUTO_INCREMENT` : dataType,
+    isNullable: readMySqlRowField<string>(row, "is_nullable") === "YES",
+    defaultValue: readMySqlRowField<string | null>(row, "column_default") ?? null,
+    comment: readMySqlRowField<string | null>(row, "column_comment") ?? null,
   };
 }
 
@@ -63,23 +117,62 @@ function buildConstraintMap(rows: ConstraintRow[]): Map<string, TableConstraintD
   const grouped = new Map<string, TableConstraintDefinition[]>();
 
   for (const row of rows) {
-    const constraints = grouped.get(row.table_name) ?? [];
+    const tableName = readMySqlRowField<string>(row, "table_name");
+    const constraintName = readMySqlRowField<string>(row, "constraint_name");
+    const constraintType = readMySqlRowField<ConstraintRow["constraint_type"]>(row, "constraint_type");
+    const constraintColumns = readMySqlRowField<string>(row, "constraint_columns");
+    if (!tableName || !constraintName || !constraintType || !constraintColumns) {
+      continue;
+    }
+
+    const constraints = grouped.get(tableName) ?? [];
     constraints.push({
-      constraintName: row.constraint_name,
-      constraintType: row.constraint_type,
-      columns: row.constraint_columns.split(",").map((column) => column.trim()).filter(Boolean),
+      constraintName,
+      constraintType,
+      columns: constraintColumns.split(",").map((column) => column.trim()).filter(Boolean),
     });
-    grouped.set(row.table_name, constraints);
+    grouped.set(tableName, constraints);
   }
 
   return grouped;
 }
 
-function groupTableSchemas(rows: ColumnRow[], constraintMap: Map<string, TableConstraintDefinition[]>): TableSchema[] {
-  const grouped = new Map<string, TableColumn[]>();
+function buildRelationMap(rows: ForeignKeyRow[]): Map<string, TableRelation[]> {
+  const grouped = new Map<string, TableRelation[]>();
 
   for (const row of rows) {
-    const tableName = row.table_name;
+    const tableName = readMySqlRowField<string>(row, "table_name");
+    const referencedTableName = readMySqlRowField<string>(row, "referenced_table_name");
+    const fkColumns = readMySqlRowField<string>(row, "fk_columns");
+    const referencedColumns = readMySqlRowField<string>(row, "referenced_columns");
+    if (!tableName || !referencedTableName || !fkColumns || !referencedColumns) {
+      continue;
+    }
+
+    const relations = grouped.get(tableName) ?? [];
+    relations.push({
+      toTable: referencedTableName,
+      fromColumns: fkColumns.split(",").map((column) => column.trim()).filter(Boolean),
+      toColumns: referencedColumns.split(",").map((column) => column.trim()).filter(Boolean),
+      type: "foreign_key",
+      source: "database",
+    });
+    grouped.set(tableName, relations);
+  }
+
+  return grouped;
+}
+
+function groupTableSchemas(
+  rows: ColumnRow[],
+  constraintMap: Map<string, TableConstraintDefinition[]>,
+  relationMap: Map<string, TableRelation[]>,
+): TableSchema[] {
+  const grouped = new Map<string, TableColumn[]>();
+  const comments = new Map<string, string | null>();
+
+  for (const row of rows) {
+    const tableName = readMySqlRowField<string>(row, "table_name");
     if (!tableName) {
       continue;
     }
@@ -87,16 +180,29 @@ function groupTableSchemas(rows: ColumnRow[], constraintMap: Map<string, TableCo
     const columns = grouped.get(tableName) ?? [];
     columns.push(toTableColumn(row));
     grouped.set(tableName, columns);
+    if (!comments.has(tableName)) {
+      comments.set(tableName, readMySqlRowField<string | null>(row, "table_comment") ?? null);
+    }
   }
 
   return Array.from(grouped.entries())
-    .map(([tableName, columns]) => buildTableSchema(tableName, columns, constraintMap.get(tableName) ?? [], undefined, "reconstructed"))
+    .map(([tableName, columns]) =>
+      buildTableSchema(
+        tableName,
+        columns,
+        constraintMap.get(tableName) ?? [],
+        undefined,
+        "reconstructed",
+        comments.get(tableName) ?? null,
+        relationMap.get(tableName) ?? [],
+      ),
+    )
     .sort((left, right) => left.tableName.localeCompare(right.tableName));
 }
 
 function buildColumnMetadataQuery(includeTableFilter: boolean): string {
   return `
-    select c.table_name, c.column_name, c.column_type as data_type, c.is_nullable, c.column_default, c.extra
+    select c.table_name, t.table_comment, c.column_name, c.column_type as data_type, c.is_nullable, c.column_default, c.extra, c.column_comment
     from information_schema.columns c
     join information_schema.tables t
       on t.table_schema = c.table_schema
@@ -129,6 +235,26 @@ function buildConstraintMetadataQuery(includeTableFilter: boolean): string {
   `;
 }
 
+function buildForeignKeyMetadataQuery(includeTableFilter: boolean): string {
+  return `
+    select
+      kcu.table_name,
+      kcu.referenced_table_name,
+      group_concat(kcu.column_name order by kcu.ordinal_position separator ',') as fk_columns,
+      group_concat(kcu.referenced_column_name order by kcu.ordinal_position separator ',') as referenced_columns
+    from information_schema.key_column_usage kcu
+    join information_schema.tables t
+      on t.table_schema = kcu.table_schema
+     and t.table_name = kcu.table_name
+   where kcu.table_schema = ?
+     and t.table_type = 'BASE TABLE'
+     and kcu.referenced_table_name is not null
+     ${includeTableFilter ? "and kcu.table_name = ?" : ""}
+   group by kcu.table_name, kcu.constraint_name, kcu.referenced_table_name
+   order by kcu.table_name, kcu.constraint_name
+  `;
+}
+
 /**
  * MySQL implementation of the shared database adapter contract.
  */
@@ -149,6 +275,7 @@ export class MySqlAdapter implements DatabaseAdapter {
       ssl: config.ssl ? {} : undefined,
       connectionLimit: 5,
       namedPlaceholders: false,
+      typeCast: castMySqlField,
     });
   }
 
@@ -183,7 +310,9 @@ export class MySqlAdapter implements DatabaseAdapter {
       `,
       [this.config.database],
     );
-    const tableNames = rows.map((row) => row.table_name);
+    const tableNames = rows
+      .map((row) => readMySqlRowField<string>(row, "table_name"))
+      .filter((tableName): tableName is string => Boolean(tableName));
 
     let rowCountsByTable = new Map<string, number>();
     if (includeRowCount && tableNames.length) {
@@ -212,21 +341,23 @@ export class MySqlAdapter implements DatabaseAdapter {
    * Return ordered column metadata for all MySQL base tables in the active database.
    */
   async getAllTableSchemas(): Promise<TableSchema[]> {
-    const [columnRows, constraintRows] = await Promise.all([
+    const [columnRows, constraintRows, foreignKeyRows] = await Promise.all([
       this.pool.query<ColumnRow[]>(buildColumnMetadataQuery(false), [this.config.database]),
       this.pool.query<ConstraintRow[]>(buildConstraintMetadataQuery(false), [this.config.database]),
+      this.pool.query<ForeignKeyRow[]>(buildForeignKeyMetadataQuery(false), [this.config.database]),
     ]);
 
-    return groupTableSchemas(columnRows[0], buildConstraintMap(constraintRows[0]));
+    return groupTableSchemas(columnRows[0], buildConstraintMap(constraintRows[0]), buildRelationMap(foreignKeyRows[0]));
   }
 
   /**
    * Return ordered column metadata for one MySQL table.
    */
   async describeTable(tableName: string): Promise<TableSchema> {
-    const [columnRows, constraintRows, showCreateRows] = await Promise.all([
+    const [columnRows, constraintRows, foreignKeyRows, showCreateRows] = await Promise.all([
       this.pool.query<ColumnRow[]>(buildColumnMetadataQuery(true), [this.config.database, tableName]),
       this.pool.query<ConstraintRow[]>(buildConstraintMetadataQuery(true), [this.config.database, tableName]),
+      this.pool.query<ForeignKeyRow[]>(buildForeignKeyMetadataQuery(true), [this.config.database, tableName]),
       this.pool.query<ShowCreateTableRow[]>(`SHOW CREATE TABLE \`${tableName.replace(/`/g, "``")}\``),
     ]);
 
@@ -248,6 +379,8 @@ export class MySqlAdapter implements DatabaseAdapter {
       buildConstraintMap(constraintRows[0]).get(tableName) ?? [],
       nativeDdl,
       nativeDdl ? "native" : "reconstructed",
+      columnRows[0][0]?.table_comment ?? null,
+      buildRelationMap(foreignKeyRows[0]).get(tableName) ?? [],
     );
   }
 
@@ -282,7 +415,7 @@ export class MySqlAdapter implements DatabaseAdapter {
     // FORMAT=JSON gives the agent a structured plan that is easier to reason over than tabular EXPLAIN.
     const [rows] = await this.pool.query<RowDataPacket[]>(`EXPLAIN FORMAT=JSON ${sql}`);
     const elapsedMs = performance.now() - started;
-    const rawPlan = rows[0]?.EXPLAIN ?? rows;
+    const rawPlan = normalizeMySqlExplainPlan(rows[0]?.EXPLAIN ?? rows);
 
     return {
       sql,

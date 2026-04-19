@@ -5,6 +5,7 @@ const READ_ONLY_OPERATIONS = new Set<SqlOperation>(["SELECT", "SHOW", "DESCRIBE"
 const MUTATION_OPERATIONS = new Set<SqlOperation>(["INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME"]);
 const DML_OPERATIONS = new Set<SqlOperation>(["INSERT", "UPDATE", "DELETE"]);
 const DDL_OPERATIONS = new Set<SqlOperation>(["CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME"]);
+const EXPLICIT_ROW_LIMIT_PATTERN = /\blimit\b|\bfetch\s+(?:first|next)\b/iu;
 
 function skipWhitespace(value: string, index: number): number {
   let nextIndex = index;
@@ -422,6 +423,13 @@ export function categorizeSqlOperation(operation: SqlOperation): SqlExecutionCat
 }
 
 /**
+ * Detect whether a SQL statement already carries an explicit row cap.
+ */
+export function hasExplicitRowLimit(sql: string): boolean {
+  return EXPLICIT_ROW_LIMIT_PATTERN.test(stripSqlComments(sql));
+}
+
+/**
  * Produce warnings and a mutation flag for one SQL statement.
  */
 export function assessSqlSafety(sql: string): SqlSafetyAssessment {
@@ -443,7 +451,7 @@ export function assessSqlSafety(sql: string): SqlSafetyAssessment {
     warnings.push("SELECT * was detected. This may increase unnecessary IO and network cost.");
   }
 
-  if (/\border\s+by\b/i.test(sql) && !/\blimit\b/i.test(sql) && operation === "SELECT") {
+  if (/\border\s+by\b/i.test(sql) && !hasExplicitRowLimit(sql) && operation === "SELECT") {
     warnings.push("ORDER BY without LIMIT was detected. This may trigger a large sort.");
   }
 

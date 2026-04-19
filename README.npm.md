@@ -77,10 +77,10 @@ Built-in provider presets include:
 
 - Local config is stored in `~/.db-chat-cli/config.json`.
 - Schema catalog data is stored in `~/.db-chat-cli/schema-catalog/`.
-- Local embedding models are stored in `~/.db-chat-cli/models/`.
+- Generated HTML result views, matching CSV files, and JSON exports are stored in `~/.db-chat-cli/tmp/`.
+- `dbchat config show` prints both the masked stored config and the masked resolved runtime config.
 - The on-disk directory name remains `~/.db-chat-cli/` for compatibility with existing local installs.
-- Semantic catalog features may download a local GGUF embedding model on first use.
-- The package depends on `node-llama-cpp` for local embeddings, so installation environments must support that dependency.
+- Schema catalog sync can optionally call a remote embedding API when an embedding key is configured, but local BM25 catalog search still works without embeddings.
 
 ## Common Commands
 
@@ -102,8 +102,16 @@ Common overrides:
 - `DBCHAT_LLM_PROVIDER`
 - `DBCHAT_LLM_API_FORMAT`
 - `DBCHAT_API_KEY`
+- `OPENAI_API_KEY`
+- `ANTHROPIC_API_KEY`
+- `DEEPSEEK_API_KEY`
 - `DBCHAT_LLM_BASE_URL`
 - `DBCHAT_LLM_MODEL`
+- `DBCHAT_EMBEDDING_PROVIDER`
+- `DBCHAT_EMBEDDING_API_KEY`
+- `DBCHAT_EMBEDDING_BASE_URL`
+- `DBCHAT_EMBEDDING_MODEL`
+- `DASHSCOPE_API_KEY`
 - `DBCHAT_DB_DIALECT`
 - `DBCHAT_DB_HOST`
 - `DBCHAT_DB_PORT`
@@ -112,6 +120,8 @@ Common overrides:
 - `DBCHAT_DB_PASSWORD`
 - `DBCHAT_DB_SCHEMA`
 - `DBCHAT_DB_SSL`
-- `EMBEDDING_MODEL_URL`
+- `DBCHAT_FORCE_HYPERLINK`
+
+A project-local `.env` file in the current working directory is loaded as a default-value layer below shell env and below `~/.db-chat-cli/config.json`.
 
 The source repository contains the full development README, architecture notes, and agent-oriented docs.

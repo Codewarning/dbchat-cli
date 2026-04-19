@@ -1,6 +1,6 @@
 // Result export helpers keep file-format concerns out of the tool registry.
-import { lstat, mkdir, realpath, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { writeFile } from "node:fs/promises";
+import { createWorkspaceTempArtifactPath, toFileUrl } from "../fs/temp-artifacts.js";
 import type { ExportResult, QueryExecutionResult } from "../types/index.js";
 
 /**
@@ -16,34 +16,17 @@ function escapeCsvValue(value: unknown): string {
 }
 
 /**
- * Resolve an export path and reject targets that escape the active working directory.
+ * Create one export file path under the app temp directory.
  */
-export async function resolveOutputPathForExport(cwd: string, outputPath: string): Promise<string> {
-  const resolved = path.isAbsolute(outputPath) ? outputPath : path.resolve(cwd, outputPath);
-  const resolvedParent = path.dirname(resolved);
-  await mkdir(resolvedParent, { recursive: true });
-
-  const [realCwd, realParent] = await Promise.all([realpath(cwd), realpath(resolvedParent)]);
-  const finalPath = path.join(realParent, path.basename(resolved));
-  const relativePath = path.relative(realCwd, finalPath);
-
-  // Exports are intentionally sandboxed to the current working directory.
-  if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
-    throw new Error("The export path must stay within the current working directory.");
-  }
-
-  try {
-    const targetStats = await lstat(finalPath);
-    if (targetStats.isSymbolicLink()) {
-      throw new Error("The export path cannot point to a symbolic link.");
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw error;
-    }
-  }
-
-  return finalPath;
+export async function resolveTemporaryOutputPathForExport(
+  format: "json" | "csv",
+  outputPath?: string,
+): Promise<string> {
+  return createWorkspaceTempArtifactPath({
+    prefix: `export-${format}`,
+    extension: format === "json" ? ".json" : ".csv",
+    suggestedName: outputPath,
+  });
 }
 
 /**
@@ -52,10 +35,10 @@ export async function resolveOutputPathForExport(cwd: string, outputPath: string
 export async function exportQueryResult(
   result: QueryExecutionResult,
   format: "json" | "csv",
-  outputPath: string,
-  cwd: string,
+  outputPath: string | undefined,
+  _cwd: string,
 ): Promise<ExportResult> {
-  const resolvedPath = await resolveOutputPathForExport(cwd, outputPath);
+  const resolvedPath = await resolveTemporaryOutputPathForExport(format, outputPath);
 
   if (format === "json") {
     // JSON exports preserve the raw row objects for downstream tooling.
@@ -73,6 +56,7 @@ export async function exportQueryResult(
   return {
     format,
     outputPath: resolvedPath,
+    fileUrl: toFileUrl(resolvedPath),
     rowCount: result.rows.length,
     truncated: result.rowsTruncated,
   };

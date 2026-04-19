@@ -7,6 +7,9 @@ export type SqlExecutionCategory = "read_only" | "dml" | "ddl" | "unknown";
 export type SqlApprovalDecision = "approve_once" | "approve_all" | "reject";
 export type DatabaseOperationAccess = "read_only" | "select_update" | "select_update_delete" | "select_update_delete_ddl";
 export type TableDdlSource = "native" | "reconstructed";
+export type TableRelationSource = "database";
+export type SchemaCatalogDocumentKind = "table" | "column" | "relation";
+export type SchemaCatalogDocumentSource = "database" | "generated";
 
 export type PlanStatus = "pending" | "in_progress" | "completed" | "skipped" | "cancelled";
 
@@ -85,7 +88,7 @@ export interface StoredDatabaseHost {
 }
 
 /**
- * App-level runtime limits that influence result caching and previews.
+ * App-level runtime limits that influence context packing and agent loop bounds.
  */
 export interface ContextCompressionConfig {
   recentRawTurns: number;
@@ -93,6 +96,16 @@ export interface ContextCompressionConfig {
   largeToolOutputChars: number;
   persistedToolPreviewChars: number;
   maxToolCallsPerTurn: number;
+  maxAgentIterations: number;
+}
+
+/**
+ * App-level runtime limits that influence result caching, previews, and context packing.
+ */
+export interface TableRenderingConfig {
+  inlineRowLimit: number;
+  inlineColumnLimit: number;
+  previewRowLimit: number;
 }
 
 /**
@@ -101,6 +114,8 @@ export interface ContextCompressionConfig {
 export interface AppRuntimeConfig {
   resultRowLimit: number;
   previewRowLimit: number;
+  tempArtifactRetentionDays: number;
+  tableRendering: TableRenderingConfig;
   contextCompression: ContextCompressionConfig;
 }
 
@@ -122,10 +137,13 @@ export interface StoredConfig {
   embedding?: Partial<EmbeddingConfig>;
   databaseHosts?: StoredDatabaseHost[];
   activeDatabaseHost?: string;
+  activeDatabasePort?: number;
   activeDatabaseName?: string;
   app?: {
     resultRowLimit?: number;
     previewRowLimit?: number;
+    tempArtifactRetentionDays?: number;
+    tableRendering?: Partial<TableRenderingConfig>;
     contextCompression?: Partial<ContextCompressionConfig>;
   };
 }
@@ -175,6 +193,21 @@ export interface TableColumn {
   dataType: string;
   isNullable: boolean;
   defaultValue: string | null;
+  comment?: string | null;
+  description?: string;
+  aliases?: string[];
+}
+
+/**
+ * Table-level relationship metadata derived from database constraints.
+ */
+export interface TableRelation {
+  toTable: string;
+  fromColumns: string[];
+  toColumns?: string[];
+  type: string;
+  description?: string;
+  source: TableRelationSource;
 }
 
 /**
@@ -185,6 +218,8 @@ export interface TableSchema {
   columns: TableColumn[];
   ddlPreview?: string;
   ddlSource?: TableDdlSource;
+  comment?: string | null;
+  relations?: TableRelation[];
 }
 
 /**
@@ -196,11 +231,31 @@ export interface SchemaCatalogTable {
   summaryText: string;
   ddlPreview?: string;
   ddlSource?: TableDdlSource;
+  dbComment?: string | null;
+  instructionContext?: string;
+  businessName?: string;
   description: string;
   tags: string[];
-  embeddingText: string;
-  embeddingVector: number[];
+  aliases: string[];
+  examples: string[];
+  embeddingText?: string;
+  embeddingVector?: number[];
   columns: TableColumn[];
+  relations: TableRelation[];
+}
+
+/**
+ * One retrievable document built from persisted schema facts.
+ */
+export interface SchemaCatalogDocument {
+  id: string;
+  tableName: string;
+  kind: SchemaCatalogDocumentKind;
+  title: string;
+  content: string;
+  source: SchemaCatalogDocumentSource;
+  fieldName?: string;
+  tokens: string[];
 }
 
 /**
@@ -215,8 +270,11 @@ export interface SchemaCatalog {
   schema?: string;
   generatedAt: string;
   tableCount: number;
-  embeddingModelId: string;
+  documentCount: number;
+  instructionFingerprint: string | null;
+  embeddingModelId: string | null;
   tables: SchemaCatalogTable[];
+  documents: SchemaCatalogDocument[];
 }
 
 /**
@@ -228,7 +286,10 @@ export interface SchemaCatalogSearchMatch {
   description: string;
   tags: string[];
   matchedColumns: string[];
+  matchedAliases: string[];
   matchReasons: string[];
+  documentKinds: string[];
+  matchedSources: string[];
   score: number;
   semanticScore: number;
   keywordScore: number;
@@ -240,6 +301,9 @@ export interface SchemaCatalogSearchMatch {
 export interface SchemaCatalogSearchResult {
   query: string;
   totalMatches: number;
+  isAmbiguous: boolean;
+  ambiguityReason?: string;
+  clarificationCandidates: string[];
   matches: SchemaCatalogSearchMatch[];
 }
 
@@ -250,12 +314,14 @@ export interface SchemaCatalogSyncResult {
   catalogPath: string;
   generatedAt: string;
   tableCount: number;
+  documentCount: number;
   addedTables: string[];
   updatedTables: string[];
   removedTables: string[];
   unchangedTableCount: number;
   reindexedTableCount: number;
   reusedIndexCount: number;
+  semanticIndexEnabled: boolean;
 }
 
 /**
@@ -269,6 +335,8 @@ export interface QueryExecutionResult {
   rowsTruncated: boolean;
   fields: string[];
   elapsedMs: number;
+  autoAppliedReadOnlyLimit?: number;
+  htmlArtifact?: QueryResultHtmlArtifact;
 }
 
 /**
@@ -298,8 +366,36 @@ export interface SqlSafetyAssessment {
 export interface ExportResult {
   format: "json" | "csv";
   outputPath: string;
+  fileUrl: string;
   rowCount: number;
   truncated: boolean;
+}
+
+/**
+ * One generated HTML artifact that can be opened in a browser for richer table inspection.
+ */
+export interface QueryResultHtmlArtifact {
+  outputPath: string;
+  fileUrl: string;
+  csvOutputPath: string;
+  csvFileUrl: string;
+  generatedAt: string;
+  cachedRowCount: number;
+  rowCount: number;
+  fieldCount: number;
+}
+
+/**
+ * One program-generated block rendered beside the assistant reply without asking the model to format it.
+ */
+export interface TurnDisplayBlock {
+  kind: "result_table";
+  title: string;
+  body: string;
+  table?: {
+    fields: string[];
+    rows: Record<string, unknown>[];
+  };
 }
 
 /**

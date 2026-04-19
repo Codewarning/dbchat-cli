@@ -1,6 +1,6 @@
 {
   "name": "dbchat-cli",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": false,
   "description": "A database-focused CLI assistant for PostgreSQL and MySQL with natural-language, SQL, schema, and explain workflows.",
   "type": "module",
@@ -14,7 +14,6 @@
   "bugs": {
     "url": "https://github.com/Codewarning/dbchat-cli/issues"
   },
-
   "bin": {
     "dbchat": "dist/index.js"
   },

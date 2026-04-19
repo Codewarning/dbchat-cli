@@ -1,7 +1,9 @@
 import { createRequire } from "node:module";
 import { Box, Text } from "ink";
+import type { ReactNode } from "react";
 import { getPlanStatusIcon } from "../agent/plan.js";
 import type { PlanItem } from "../types/index.js";
+import { buildFixedWidthTableModel, renderFixedWidthTable } from "../ui/text-table.js";
 import type { ChatEntry, EntryTone, LoadingTask } from "./chat-ui-types.js";
 
 const require = createRequire(import.meta.url);
@@ -12,6 +14,7 @@ const CHAT_PRODUCT_VERSION = typeof packageMetadata.version === "string" ? `v${p
 const METADATA_LABEL_WIDTH = 11;
 const LOG_ENTRY_MARGIN_BOTTOM = 0;
 const MESSAGE_ENTRY_MARGIN_BOTTOM = 1;
+const ARTIFACT_LINE_PATTERN = /^(?<label>[^:：\n]{1,80}[:：])\s*(?<target>.+)$/u;
 
 /**
  * Generate a stable unique UI id for Ink list keys and async state handles.
@@ -235,6 +238,134 @@ function MetadataRow({ label, value, valueColor }: { label: string; value: strin
   );
 }
 
+function isLikelyArtifactTarget(value: string): boolean {
+  return /^file:\/\//i.test(value) || /^[a-zA-Z]:\\/.test(value) || value.startsWith("/") || value.startsWith("\\\\");
+}
+
+function StyledEntryLine({
+  prefix = "",
+  line,
+  color,
+  dimColor,
+}: {
+  prefix?: string;
+  line: string;
+  color?: string;
+  dimColor?: boolean;
+}) {
+  const trimmedLine = line.trim();
+  if (isLikelyArtifactTarget(trimmedLine)) {
+    return (
+      <Text color="cyan" underline>
+        {`${prefix}${line || " "}`}
+      </Text>
+    );
+  }
+
+  const match = line.match(ARTIFACT_LINE_PATTERN);
+  const label = match?.groups?.label;
+  const target = match?.groups?.target?.trim();
+  if (label && target && isLikelyArtifactTarget(target)) {
+    return (
+      <Box width="100%">
+        <Text>
+          {`${prefix}${label} `}
+        </Text>
+        <Text color="cyan" underline>
+          {target}
+        </Text>
+      </Box>
+    );
+  }
+
+  return (
+    <Text color={color} dimColor={dimColor}>
+      {`${prefix}${line || " "}`}
+    </Text>
+  );
+}
+
+function splitBodyAroundRenderedTable(body: string, tableText: string): { beforeLines: string[]; afterLines: string[] } | null {
+  const bodyLines = body.split("\n");
+  const tableLines = tableText.split("\n");
+
+  if (!tableLines.length || bodyLines.length < tableLines.length) {
+    return null;
+  }
+
+  for (let startIndex = 0; startIndex <= bodyLines.length - tableLines.length; startIndex += 1) {
+    const matches = tableLines.every((line, offset) => bodyLines[startIndex + offset] === line);
+    if (!matches) {
+      continue;
+    }
+
+    return {
+      beforeLines: bodyLines.slice(0, startIndex),
+      afterLines: bodyLines.slice(startIndex + tableLines.length),
+    };
+  }
+
+  return null;
+}
+
+export interface StructuredEntryTable {
+  beforeLines: string[];
+  afterLines: string[];
+  fields: string[];
+  rows: Record<string, unknown>[];
+}
+
+export function resolveStructuredEntryTable(entry: ChatEntry): StructuredEntryTable | null {
+  const table = entry.meta?.table;
+  if (!table) {
+    return null;
+  }
+
+  const renderedTable = renderFixedWidthTable(buildFixedWidthTableModel(table.rows, table.fields));
+  const splitBody = splitBodyAroundRenderedTable(entry.body, renderedTable);
+  if (!splitBody) {
+    return null;
+  }
+
+  return {
+    beforeLines: splitBody.beforeLines,
+    afterLines: splitBody.afterLines,
+    fields: table.fields,
+    rows: table.rows,
+  };
+}
+
+function InkTableRow({ cells }: { cells: string[] }) {
+  const parts: ReactNode[] = [];
+
+  cells.forEach((cell, index) => {
+    parts.push(<Text key={`cell-${index}`}>{cell}</Text>);
+    if (index < cells.length - 1) {
+      parts.push(
+        <Text key={`sep-${index}`} dimColor>
+          {" | "}
+        </Text>,
+      );
+    }
+  });
+
+  return <Box width="100%">{parts}</Box>;
+}
+
+function InkResultTable({ fields, rows }: { fields: string[]; rows: Record<string, unknown>[] }) {
+  const model = buildFixedWidthTableModel(rows, fields);
+
+  return (
+    <Box width="100%" flexDirection="column">
+      <InkTableRow cells={model.headerCells} />
+      <Text dimColor>{model.separatorLine}</Text>
+      {model.rows.map((row, index) => (
+        <InkTableRow key={`row-${index}`} cells={row} />
+      ))}
+    </Box>
+  );
+}
+
 function WelcomeHeader({ model, database, permission }: { model: string; database: string; permission: string }) {
   return (
     <Box width="100%" flexDirection="column" marginBottom={1}>
@@ -262,6 +393,7 @@ export function ChatEntryView({ entry }: { entry: ChatEntry }) {
   const color = getToneColor(entry.tone);
   const lines = entry.body.split("\n");
   const plan = entry.meta?.plan;
+  const structuredTable = resolveStructuredEntryTable(entry);
 
   if (entry.tone === "welcome") {
     return <WelcomeHeader model={entry.meta?.model ?? ""} database={entry.meta?.database ?? ""} permission={entry.meta?.permission ?? ""} />;
@@ -279,11 +411,44 @@ export function ChatEntryView({ entry }: { entry: ChatEntry }) {
     );
   }
 
+  if (structuredTable) {
+    return (
+      <Box width="100%" flexDirection="column" marginBottom={LOG_ENTRY_MARGIN_BOTTOM}>
+        {entry.title ? (
+          <Text color={color} bold>
+            {entry.title}
+          </Text>
+        ) : null}
+        {structuredTable.beforeLines.map((line, index) => (
+          <StyledEntryLine
+            key={`${entry.id}-before-${index}`}
+            prefix={entry.title ? "  " : ""}
+            line={line}
+            color={entry.title ? "gray" : color}
+            dimColor={entry.tone === "muted"}
+          />
+        ))}
+        <Box paddingLeft={entry.title ? 2 : 0}>
+          <InkResultTable fields={structuredTable.fields} rows={structuredTable.rows} />
+        </Box>
+        {structuredTable.afterLines.map((line, index) => (
+          <StyledEntryLine
+            key={`${entry.id}-after-${index}`}
+            prefix={entry.title ? "  " : ""}
+            line={line}
+            color={entry.title ? "gray" : color}
+            dimColor={entry.tone === "muted"}
+          />
+        ))}
+      </Box>
+    );
+  }
+
   if (entry.tone === "assistant") {
     return (
       <Box width="100%" flexDirection="column" marginBottom={MESSAGE_ENTRY_MARGIN_BOTTOM}>
         {lines.map((line, index) => (
-          <Text key={`${entry.id}-${index}`}>{line || " "}</Text>
+          <StyledEntryLine key={`${entry.id}-${index}`} line={line} />
         ))}
       </Box>
     );
@@ -317,9 +482,13 @@ export function ChatEntryView({ entry }: { entry: ChatEntry }) {
     return (
       <Box width="100%" flexDirection="column" marginBottom={LOG_ENTRY_MARGIN_BOTTOM}>
         {lines.map((line, index) => (
-          <Text key={`${entry.id}-${index}`} color={color} dimColor={entry.tone === "muted"}>
-            {index === 0 ? `${prefix} ${line || " "}` : `  ${line || " "}`}
-          </Text>
+          <StyledEntryLine
+            key={`${entry.id}-${index}`}
+            prefix={index === 0 ? `${prefix} ` : "  "}
+            line={line}
+            color={color}
+            dimColor={entry.tone === "muted"}
+          />
         ))}
       </Box>
     );
@@ -333,9 +502,13 @@ export function ChatEntryView({ entry }: { entry: ChatEntry }) {
         </Text>
       ) : null}
       {lines.map((line, index) => (
-        <Text key={`${entry.id}-${index}`} color={entry.title ? "gray" : color} dimColor={entry.tone === "muted"}>
-          {`  ${line || " "}`}
-        </Text>
+        <StyledEntryLine
+          key={`${entry.id}-${index}`}
+          prefix="  "
+          line={line}
+          color={entry.title ? "gray" : color}
+          dimColor={entry.tone === "muted"}
+        />
       ))}
     </Box>
   );

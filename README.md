@@ -85,7 +85,7 @@ For local iterative development, `pnpm link --global` is usually the better opti
 node dist/index.js init
 ```
 
-The interactive setup now lets you choose an LLM provider preset:
+The interactive setup lets you choose an LLM provider preset:
 
 - OpenAI GPT
 - Claude / Anthropic
@@ -93,15 +93,11 @@ The interactive setup now lets you choose an LLM provider preset:
 - Custom
 
 For each preset, the CLI pre-fills the default `base URL` and `model`, and you can override both manually.
-The interactive setup now uses arrow-key menus for provider/dialect/yes-no prompts and for common values such as ports, schemas, row limits, base URLs, and models. You can still choose a custom value when needed.
+The setup also uses arrow-key menus for provider, dialect, yes/no prompts, and common values such as ports, schemas, row limits, base URLs, and models.
+Database host prompts also use dialect-specific defaults. For example, PostgreSQL defaults to port `5432` and username `postgres`, while MySQL defaults to port `3306` and username `root`.
+
 Database host and database entries are stored without any persisted SQL access preset.
 The active runtime access level is selected when you switch databases inside `chat`, and startup defaults to `Read only`.
-
-The database setup now stores:
-
-- one active host config
-- one active database under that host
-- any number of additional host configs and database names managed later through `config db` commands
 
 Configuration is stored in:
 
@@ -109,50 +105,109 @@ Configuration is stored in:
 ~/.db-chat-cli/config.json
 ```
 
+Project-level defaults can also live in:
+
+```text
+./.env
+```
+
+The repository now includes a root `.env` file with every supported config-related environment variable.
+It is treated as a workspace default layer, not as a hard override.
+Priority order is:
+
+- shell environment variables
+- `~/.db-chat-cli/config.json`
+- `./.env`
+- built-in code defaults
+
+Use `dbchat config show` to inspect both the stored file values and the final resolved runtime config after shell env and `.env` defaults are applied.
+It is also the quickest way to diagnose why a database-backed command such as `schema`, `sql`, `explain`, `ask`, `chat`, or `catalog search` cannot start.
+
 Advanced session context controls live under `app.contextCompression` in that config file.
 They are optional and default to conservative values, so existing installs keep working without migration.
+Table preview controls live under `app.tableRendering`:
 
-When an embedding-backed workflow first needs it, the CLI ensures a local GGUF embedding model exists under:
+- `inlineRowLimit`
+- `inlineColumnLimit`
+- `previewRowLimit`
 
-```text
-~/.db-chat-cli/models/
-```
+Temp artifact cleanup also uses `app.tempArtifactRetentionDays`.
+The default is 3 days and it can be overridden from `.env` with `DBCHAT_TEMP_ARTIFACT_RETENTION_DAYS`.
 
-It downloads the model automatically when missing and shows a progress bar in the terminal.
-If a download fails, the CLI deletes the temporary file and retries from zero on the next attempt.
-Inside the Ink chat UI, the same download now appears in the `Active tasks` panel with live byte progress instead of writing directly to stdout.
-The download uses `EMBEDDING_MODEL_URL` when it is set.
-Otherwise the CLI tries this primary source first:
+Generated HTML result views and agent exports are stored under the config directory:
 
 ```text
-https://huggingface.co/ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/resolve/main/embeddinggemma-300m-qat-Q8_0.gguf
+~/.db-chat-cli/tmp/
 ```
 
-If the primary source fails, the CLI retries with:
+On each CLI startup, files older than the configured retention window are deleted automatically.
+The default retention is 3 days.
+
+## Scoped Instructions
+
+Optional scoped instruction files live under:
 
 ```text
-https://hf-mirror.com/ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/resolve/main/embeddinggemma-300m-qat-q8_0.gguf
+~/.db-chat-cli/agents/
+  AGENTS.md
+  <host-port>/AGENTS.md
+  <host-port>/<database>/AGENTS.md
+  <host-port>/<database>/tables/<table>.md
 ```
 
-When the local schema catalog is refreshed, the CLI uses the configured LLM together with that local embedding model to enrich every table with:
+When multiple layers exist for the active target, precedence is:
 
-- an English description
-- search tags
-- a persisted embedding vector
+- `database > host > global`
 
-Unchanged tables reuse the existing semantic index, and the index powers fast table retrieval in `dbchat catalog search`, `ask`, and `chat`.
+If a file contains no reserved sections, the whole file applies to both runtime prompts and catalog sync.
+If it uses reserved headings, `dbchat` reads:
 
-`dbchat catalog sync` therefore now depends on a working LLM configuration, the local embedding model, and database connectivity.
-The catalog is stored locally under `~/.db-chat-cli/schema-catalog/` in nested directories grouped by dialect, host-port, and database, with one JSON file per schema target.
-The on-disk directory name remains `~/.db-chat-cli/` for compatibility with existing local installs.
-When `ask`, `chat`, or a live database switch enters a database target, the CLI reuses the existing compatible local schema catalog when it is already present.
-If the catalog is missing or incompatible with the current embedding model, the CLI can initialize it at database-entry time after explicit approval for the required remote metadata transfer.
+- `## Shared` + `## Runtime` for `ask` and `chat`
+- `## Shared` + `## Catalog` for `catalog sync`
+
+Path fragments are normalized into readable filesystem-safe lowercase segments.
+When a database target is selected or switched successfully, `dbchat` initializes this directory tree automatically: missing `AGENTS.md` files and missing `tables/*.md` files are created as blank files, while existing files are left untouched.
+
+## Schema Catalog
+
+The local schema catalog is stored under:
+
+```text
+PostgreSQL: ~/.db-chat-cli/schema-catalog/postgres/<host-port>/<database>/<schema>/
+MySQL:      ~/.db-chat-cli/schema-catalog/mysql/<host-port>/<database>/public/
+```
+
+Each database target now uses readable path segments instead of hashed directory names.
+A catalog scope contains:
+
+- `catalog.json`
+  the local schema catalog snapshot and its search documents
+
+`dbchat catalog sync` reads live table schemas from the active database and rebuilds the local catalog snapshot.
+It also loads the matching scoped instruction files for the active target and stores an instruction fingerprint in the catalog snapshot.
+It always builds local table-level, column-level, and relation-level search documents for BM25-style retrieval, and table documents now carry a clipped instruction-context summary so local search and optional embeddings can reuse the same business hints.
+
+If an embedding API key is configured, sync also stores optional per-table embedding vectors as an additional recall signal that can be reused on later syncs.
+Embeddings are an enhancement, not a requirement for local schema search.
+
+`dbchat catalog search`, `ask`, and `chat` search this local catalog first.
+Search queries stay local in the default workflow and do not call the embedding API.
+Scoped instruction files are loaded locally and do not trigger remote API calls by themselves.
+When embeddings are enabled, catalog rebuilds send merged schema metadata to the configured embedding API during `catalog sync` and first-entry catalog initialization.
+
+When `ask`, `chat`, or a live database switch enters a database target, the CLI reuses the existing local schema catalog when it is already present.
+If the catalog is missing, the CLI can initialize it at database-entry time.
 After database entry, schema-catalog tools reuse the existing local catalog and do not refresh it automatically on later tool calls.
-`catalog sync` remains the manual refresh command, and `catalog search` still asks for confirmation before it sends search text to the remote embedding API.
+`dbchat catalog search` uses the stored local snapshot and does not require a live database connection after the catalog has already been built.
+It still needs a resolved active database target so the CLI knows which local snapshot directory to open.
 
 ## Environment Variables
 
-You can also override settings via environment variables:
+You can also configure settings via environment variables.
+When you run the CLI from this repository, the root `.env` file is loaded automatically as a default-value source.
+Edit that file if you want to tune the repo's local defaults, including terminal preview size.
+Shell-exported environment variables still win over both `.env` and `~/.db-chat-cli/config.json`.
+`dbchat config show` prints the same resolution order and the resolved runtime config, which makes it the easiest way to verify whether a `.env` value is active.
 
 - `DBCHAT_LLM_PROVIDER`
 - `DBCHAT_LLM_API_FORMAT`
@@ -162,14 +217,24 @@ You can also override settings via environment variables:
 - `DEEPSEEK_API_KEY`
 - `DBCHAT_LLM_BASE_URL`
 - `DBCHAT_LLM_MODEL`
-- `EMBEDDING_MODEL_URL`
+- `DBCHAT_EMBEDDING_PROVIDER`
+- `DBCHAT_EMBEDDING_API_KEY`
+- `DBCHAT_EMBEDDING_BASE_URL`
+- `DBCHAT_EMBEDDING_MODEL`
+- `DASHSCOPE_API_KEY`
 - `DBCHAT_RESULT_ROW_LIMIT`
 - `DBCHAT_PREVIEW_ROW_LIMIT`
+- `DBCHAT_TEMP_ARTIFACT_RETENTION_DAYS`
+- `DBCHAT_INLINE_TABLE_ROW_LIMIT`
+- `DBCHAT_INLINE_TABLE_COLUMN_LIMIT`
+- `DBCHAT_PREVIEW_TABLE_ROW_LIMIT`
+- `DBCHAT_FORCE_HYPERLINK`
 - `DBCHAT_CONTEXT_RECENT_RAW_TURNS`
 - `DBCHAT_CONTEXT_RAW_HISTORY_CHARS`
 - `DBCHAT_CONTEXT_LARGE_TOOL_OUTPUT_CHARS`
 - `DBCHAT_CONTEXT_PERSISTED_TOOL_PREVIEW_CHARS`
 - `DBCHAT_CONTEXT_MAX_TOOL_CALLS_PER_TURN`
+- `DBCHAT_CONTEXT_MAX_AGENT_ITERATIONS`
 - `DBCHAT_DB_DIALECT`
 - `DBCHAT_DB_HOST`
 - `DBCHAT_DB_PORT`
@@ -187,28 +252,26 @@ You can also override settings via environment variables:
 node dist/index.js chat
 ```
 
-The interactive chat session stays open after each LLM reply. It only exits when you enter `/exit` or terminate the process yourself.
-When `chat` runs in a TTY terminal, it now uses a React Ink interface with:
+The interactive chat session stays open after each LLM reply.
+It only exits when you enter `/exit` or terminate the process yourself.
 
-- an initial Codex-style welcome splash at the top of the transcript, with later chat appended below it
+When `chat` runs in a TTY terminal, it uses a React Ink interface with:
+
+- an initial Codex-style welcome splash at the top of the transcript
 - a bordered runtime info panel showing the current model and active database target
-- a plain `>` composer with an inline tip instead of a boxed input field
-- slash-command autocomplete with a dropdown picker while typing `/...` in the Ink chat UI
-- live database switching with a dropdown picker while typing `@...` in the Ink chat UI
-- a scrolling activity timeline for user input, tool/log output, and final answers
+- a plain `>` composer with an inline tip
+- slash-command autocomplete while typing `/...`
+- live database switching while typing `@...`
+- a scrolling activity timeline for user input, tool output, and final answers
 - inline loading panels for long-running tasks
-- modal-style confirmation, input, and selection prompts for SQL approval and `/host` or `/database` config flows
+- modal-style confirmation, input, and selection prompts for SQL approval and `/host` or `/database` flows
 
-If the local Ink runtime cannot initialize in the current environment, `chat` automatically falls back to the plain readline REPL so the command remains usable.
+If the Ink runtime cannot initialize in the current environment, `chat` falls back to the plain readline REPL.
 
 Inside the REPL, you can also manage stored hosts and databases with `/host ...` and `/database ...`.
-When you switch databases through `/database use`, `/host use`, or the `@` picker, the CLI prompts for the database operation access level to apply for the current runtime only. That access selection is not persisted, and the default is always `Read only`.
-After a successful database switch on a stored host, the selected database becomes the default active database for the next `chat` session on that host.
-When the selected database already exists in stored config, the `@` picker now reuses its saved schema instead of falling back to the current database schema heuristically.
-If the active database target changes inside the REPL, the CLI reconnects, clears the current conversation, and clears the terminal output so old context is not mixed into the new database session.
-If the switch keeps the same active database target and only reloads connection details or access policy, the current conversation is preserved.
-The `/clear` slash command now clears both the in-memory conversation state and the current terminal chat screen.
-Completed, skipped, or cancelled execution plans are cleared from active session context at the end of a turn, so old resolved plans are not repeated at the top of the next request.
+When you switch databases through `/database use`, `/host use`, or the `@` picker, the CLI prompts for the database operation access level to apply for the current runtime only.
+That access selection is not persisted, and the default is always `Read only`.
+Each agent turn also reloads the runtime-scoped instruction layers for the active database target before the next LLM request is built.
 
 ### One-Shot Natural-Language Requests
 
@@ -216,6 +279,12 @@ Completed, skipped, or cancelled execution plans are cleared from active session
 node dist/index.js ask "Show the order volume trend for the last 7 days"
 node dist/index.js ask "Analyze this SQL for performance and suggest improvements"
 ```
+
+For `ask` and `chat`, when the model generates a read-only `SELECT` that should show rows but omits an explicit row bound, the CLI now adds a default `LIMIT` based on `app.previewRowLimit`.
+This keeps terminal previews compact and avoids large accidental result pages unless the user clearly asks for all rows, a full export, or another exact row count.
+When a cached result fits within `app.tableRendering.inlineRowLimit` and `app.tableRendering.inlineColumnLimit`, the CLI renders it directly in the terminal.
+Larger cached results now show only the first `app.tableRendering.previewRowLimit` rows in the terminal and include a generated HTML file URL for full browser viewing.
+That HTML generation also writes a matching CSV file for the same cached rows, and the terminal preview prints that CSV file URL below the HTML URL.
 
 ### Execute SQL Directly
 
@@ -226,6 +295,9 @@ node dist/index.js sql "select * from users limit 10"
 Read-only SQL executes immediately.
 DML, DDL, and unclassified SQL that are allowed by the active database access level require approval with three choices: `Approve Once`, `Approve All For Turn`, or `Reject`.
 If the current database access level does not allow the statement, the CLI rejects it before opening the approval prompt.
+Read-only result previews follow the same table policy as `ask` and `chat`: small tables render inline, while larger tables include HTML and matching CSV file URLs under `~/.db-chat-cli/tmp/`.
+Inline terminal previews size each column from the visible header and row content, while still truncating overlong values instead of wrapping them across multiple terminal lines.
+Even when the executed SQL or an internal cached-result render request used a larger `LIMIT`, terminal previews stay bounded unless the user explicitly asked to see all returned rows or another exact visible row count.
 If a successful statement changes tracked table structure, such as `CREATE TABLE`, `ALTER TABLE`, `DROP TABLE`, or `RENAME TABLE`, the CLI keeps the SQL success result and tells you to run `dbchat catalog sync` manually before relying on updated schema-catalog search results.
 
 ### Show an Execution Plan
@@ -244,7 +316,8 @@ node dist/index.js schema --table orders
 
 By default, schema summary output lists only table names.
 If you want live row counts, pass `--count`; that triggers a real-time `COUNT(*)` query against each table before rendering the summary.
-When you inspect a specific table, the CLI now prefers a `CREATE TABLE ...` style DDL preview instead of a prose column list.
+
+When you inspect a specific table, the CLI prefers a `CREATE TABLE ...` style DDL preview instead of a prose column list.
 For MySQL, this prefers the database's native `SHOW CREATE TABLE` output.
 For PostgreSQL, the CLI currently shows a reconstructed DDL assembled from system catalogs, because PostgreSQL does not store the original `CREATE TABLE` text verbatim.
 
@@ -252,17 +325,31 @@ For PostgreSQL, the CLI currently shows a reconstructed DDL assembled from syste
 
 ```bash
 node dist/index.js catalog sync
-node dist/index.js catalog search "order items"
+node dist/index.js catalog search "user table"
 ```
 
-Both commands now ask for confirmation before they send schema metadata or search text to the configured remote APIs.
-`catalog sync` is also the manual way to rebuild the local schema catalog after schema-changing SQL.
+`catalog sync` is the manual way to rebuild the local schema catalog after schema-changing SQL.
+It rebuilds the local snapshot directly from live database schema metadata and the active target's scoped `global/host/database` instruction layers.
+During that rebuild, any missing `tables/<table>.md` files for currently visible tables are also created as blank files, while existing table markdown files are left untouched.
+
+`catalog search` runs against the merged local catalog with BM25-style retrieval and does not call the embedding API.
+If multiple candidate tables are close in score, the agent asks the user to clarify which table they mean before relying on one exact table for SQL generation or execution.
+If embeddings are configured, catalog rebuilds send merged schema metadata to the external embedding API without a separate confirmation prompt.
 
 ### Show Current Configuration
 
 ```bash
 node dist/index.js config show
+node dist/index.js config embedding update
 ```
+
+`config show` prints two masked sections:
+
+- the stored config file contents
+- the resolved runtime config after shell env and project `.env` defaults are applied
+
+If the runtime config is incomplete, the stored section still prints and the resolved section explains why it could not be built.
+Database-backed commands surface the same condition as a concise actionable error instead of dumping raw schema-validation output.
 
 ### Manage Stored Database Hosts And Databases
 
@@ -279,13 +366,11 @@ node dist/index.js config db remove-database --host local-pg
 node dist/index.js config db use-database --host local-pg
 ```
 
-For `update/remove/use` commands, the name argument is optional. If omitted, the CLI opens an arrow-key selection menu.
-For `config db use-database`, the selection menu queries the target host for live database names and saves the selected database locally when it was not already stored.
-Stored database entries now keep only connection identity such as host, database name, and optional schema.
-Runtime SQL access is selected at switch time inside `chat` and is not persisted to the config file.
-If `--host` is omitted for database commands, the CLI also lets you select a host interactively when needed.
-The same host/database management operations are also available inside `chat` mode through slash commands.
-When `chat` is running in a TTY terminal, these slash-command selections also use the same arrow-key menus.
+For `update`, `remove`, and `use` commands, the name argument is optional.
+If omitted, the CLI opens an arrow-key selection menu.
+For `config db use-database`, an explicit database name that is already stored under the selected host switches locally without requiring a live connection.
+When the database name is omitted, or when you target a database that is not already stored locally, the CLI queries the target host for live database names and saves the selected database locally when it was not already stored.
+If you reuse the same host-config name for the same server on a different port, `dbchat` automatically adjusts the stored name to keep it unique, typically by appending `-<port>`.
 
 ## Testing
 
@@ -297,6 +382,7 @@ pnpm run dev -- config show
 pnpm run dev -- sql "select 1"
 pnpm run dev -- schema
 pnpm run dev -- catalog sync
+pnpm run dev -- catalog search "user table"
 pnpm run dev -- ask "show the tables in this database"
 pnpm run dev -- chat
 ```
@@ -341,13 +427,19 @@ pnpm run dev -- schema
 pnpm run dev -- catalog sync
 ```
 
-6. Test the LLM tool loop
+6. Validate local schema search
+
+```bash
+pnpm run dev -- catalog search "user table"
+```
+
+7. Test the LLM tool loop
 
 ```bash
 pnpm run dev -- ask "show me the top 10 rows from users"
 ```
 
-7. Test the interactive chat session
+8. Test the interactive chat session
 
 ```bash
 pnpm run dev -- chat
@@ -372,10 +464,6 @@ node dist/index.js config show
 node dist/index.js sql "select 1"
 ```
 
-### Debugger Message Note
-
-If your terminal shows messages such as `Debugger attached.` or `Waiting for the debugger to disconnect...`, that usually comes from your terminal or editor environment rather than from the CLI itself. In that case, continue testing with explicit subcommands as shown above.
-
 ## REPL Slash Commands
 
 - `/help`
@@ -394,8 +482,10 @@ If your terminal shows messages such as `Debugger attached.` or `Waiting for the
 - `/database use [name] [--host <hostName>]`
 - `/exit`
 
-In the Ink chat UI, typing `/` opens slash-command suggestions. Use Up/Down to choose a command and `Tab` or `Enter` to autocomplete it.
-Typing `@` opens the live database picker for the current host. Use Up/Down to choose a database and `Tab` or `Enter` to switch to it.
+In the Ink chat UI, typing `/` opens slash-command suggestions.
+Use Up/Down to choose a command and `Tab` or `Enter` to autocomplete it.
+Typing `@` opens the live database picker for the current host.
+Use Up/Down to choose a database and `Tab` or `Enter` to switch to it.
 `/schema` lists table names only by default; use `/schema --count` when you explicitly want live row counts.
 
 ## Current Implementation Notes
@@ -405,25 +495,37 @@ Typing `@` opens the live database picker for the current host. Use Up/Down to c
 - Statements outside the active database access level are blocked before the approval gate.
 - Allowed DML, DDL, and unclassified SQL go through an explicit approval gate with `Approve Once`, `Approve All For Turn`, and `Reject`.
 - Only a single SQL statement can be executed at a time.
-- The CLI now initializes the local schema catalog only when a database target is entered, reuses the stored snapshot afterward, and leaves later refreshes to the explicit `catalog sync` command.
+- The CLI initializes the local schema catalog only when a database target is entered, reuses the stored snapshot afterward, and leaves later refreshes to the explicit `catalog sync` command.
+- The schema catalog stores one readable `catalog.json` snapshot per target and rebuilds it directly from live schema metadata.
+- `catalog search` runs against the stored local snapshot and does not require a live database connection after the snapshot exists.
+- Local schema search is BM25-style lexical retrieval over those merged documents; optional embeddings are an enhancement produced during sync, not a requirement for search.
+- `catalog search` stays local by default and does not send the search query to a remote API.
 - The model can search the local schema catalog before loading a specific table definition.
 - For destructive schema operations that depend on the current table set, the model can verify live table names directly from the active database connection instead of relying only on the local schema catalog.
-- Query results can be exported to `JSON` or `CSV`.
+- Query results automatically generate an HTML view and a matching CSV file for the same cached rows when a browser-view artifact is created.
 - `app.resultRowLimit` limits how many rows stay cached in memory after a query, and exports of the last result operate on that cached slice.
+- In `ask` and `chat`, tool-driven read-only `SELECT` queries that omit an explicit row bound are auto-capped with a default `LIMIT` derived from `app.previewRowLimit`, unless the request clearly implies a full result or export.
+- `app.tableRendering.inlineRowLimit` and `app.tableRendering.inlineColumnLimit` decide when a cached result can render fully in the terminal.
+- Larger cached results show the first `app.tableRendering.previewRowLimit` rows in the terminal and also generate an HTML view plus a matching CSV file under `~/.db-chat-cli/tmp/`.
+- Internal `render_last_result` calls keep the compact preview by default even when a larger cached row count is available; expanded terminal pages are reserved for explicit user row-count requests.
+- Terminal artifact lines use ANSI-friendly text styling, and supported terminals receive OSC 8 clickable links for HTML/CSV result artifacts without changing the model-visible plain-text content.
+- In chat mode, the final assistant reply no longer includes artifact file paths. When cached HTML/CSV artifacts exist, the CLI shows them as a separate UI block so Ink can highlight them without teaching the model to echo local paths.
+- The explicit agent export tool now writes `JSON` only; CSV is produced automatically together with the HTML result artifact.
+- The temp directory is cleaned on CLI startup by deleting generated artifacts older than `app.tempArtifactRetentionDays`, which defaults to 3 days and can be overridden through `.env`.
 - `app.contextCompression.recentRawTurns` controls how many full recent turns stay in raw prompt history before older turns are archived into summaries.
 - `app.contextCompression.rawHistoryChars` caps the raw-history character budget that can be packed into one LLM request.
 - Tool results that exceed `app.contextCompression.largeToolOutputChars` are no longer inlined into model-visible history. The session stores the full payload out of band, leaves behind a compact marker with `persistedOutputId`, and the model can fetch the omitted content later through `inspect_history_entry`.
+- `render_last_result` and `inspect_last_result` stay inline even when their payloads are large, so the model can finish result-oriented turns without rereading the same cached slice from persisted history markers.
 - `app.contextCompression.maxToolCallsPerTurn` caps how many tool calls one user turn may execute before the model is forced to conclude with the information already gathered.
+- `app.contextCompression.maxAgentIterations` caps how many LLM response rounds one user turn may take before the agent aborts the loop.
+- If cached SQL rows were rendered through `render_last_result`, the CLI keeps those program-rendered table pages available in the terminal output instead of dropping back to prose-only summaries.
+- In `ask` and `chat`, the assistant now defaults to the user's language unless the user explicitly asks for another one.
+- When a separate `Result Preview` block is already shown, the final assistant reply strips assistant-authored Markdown or plain-text result tables instead of duplicating rows in prose output.
 - Database drivers are loaded lazily so that non-database commands can start without unnecessary driver initialization.
 - The CLI supports both OpenAI-compatible tool calling and Anthropic tool calling.
 - Database config supports multiple host configs and multiple database names under each host, with active host/database switching through CLI commands and live database discovery during `use-database`.
 - Non-interactive terminal commands keep progress output compact by default, while `chat` keeps richer interactive feedback.
 - Chat sessions compress older turns into structured summaries, keep only a small recent raw window, and pack prior context into each LLM request only when the current prompt appears to need it.
-- Request-aware context packing now distinguishes fresh query/schema/explain requests from result/export/explain follow-ups, so schema memory, query memory, and cached result summaries are only attached when they are likely relevant.
-- Older archived turns now keep user request, key outcomes, and final conclusion ahead of raw tool traces, so long chats preserve higher-value context in less space.
-- The latest cached query result and latest cached EXPLAIN output can be re-inspected through dedicated tools, so follow-up turns do not need to keep carrying large previews by default.
-- Tool results sent back to the model are compact payloads rather than full raw JSON results, with wide SQL results and large EXPLAIN outputs trimmed by default because the cache-inspection tools can fetch more detail on demand.
-- When one tool payload is still too large for normal turn history, the model now receives a compact persisted-output marker and can later inspect the archived full payload or a historical turn by calling `inspect_history_entry`.
 
 ## Next Steps
 

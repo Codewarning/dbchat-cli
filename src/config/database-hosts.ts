@@ -7,7 +7,15 @@ import { DEFAULT_DATABASE_OPERATION_ACCESS } from "../db/operation-access.js";
 export interface NormalizedStoredConfig extends Omit<StoredConfig, "database"> {
   databaseHosts: StoredDatabaseHost[];
   activeDatabaseHost?: string;
+  activeDatabasePort?: number;
   activeDatabaseName?: string;
+}
+
+function matchesActiveHostSelection(
+  config: Pick<NormalizedStoredConfig, "activeDatabaseHost" | "activeDatabasePort">,
+  host: Pick<StoredDatabaseHost, "name" | "port">,
+): boolean {
+  return host.name === config.activeDatabaseHost && (config.activeDatabasePort == null || host.port === config.activeDatabasePort);
 }
 
 /**
@@ -41,15 +49,17 @@ function cloneDatabaseHost(host: StoredDatabaseHost): StoredDatabaseHost {
  */
 function normalizeActiveSelection(config: NormalizedStoredConfig): void {
   const fallbackHost = config.databaseHosts[0];
-  const activeHost = config.databaseHosts.find((host) => host.name === config.activeDatabaseHost) ?? fallbackHost;
+  const activeHost = config.databaseHosts.find((host) => matchesActiveHostSelection(config, host)) ?? fallbackHost;
 
   if (!activeHost) {
     config.activeDatabaseHost = undefined;
+    config.activeDatabasePort = undefined;
     config.activeDatabaseName = undefined;
     return;
   }
 
   config.activeDatabaseHost = activeHost.name;
+  config.activeDatabasePort = activeHost.port;
 
   const fallbackDatabase = activeHost.databases[0];
   const activeDatabase = activeHost.databases.find((database) => database.name === config.activeDatabaseName) ?? fallbackDatabase;
@@ -66,6 +76,7 @@ export function normalizeStoredConfig(stored: StoredConfig): NormalizedStoredCon
     app: stored.app ? { ...stored.app } : undefined,
     databaseHosts: (stored.databaseHosts ?? []).map(cloneDatabaseHost),
     activeDatabaseHost: stored.activeDatabaseHost,
+    activeDatabasePort: stored.activeDatabasePort,
     activeDatabaseName: stored.activeDatabaseName,
   };
 
@@ -83,6 +94,7 @@ export function toStoredConfig(config: NormalizedStoredConfig): StoredConfig {
     app: config.app ? { ...config.app } : undefined,
     databaseHosts: config.databaseHosts.map(cloneDatabaseHost),
     activeDatabaseHost: config.activeDatabaseHost,
+    activeDatabasePort: config.activeDatabasePort,
     activeDatabaseName: config.activeDatabaseName,
   };
 }
@@ -114,10 +126,20 @@ export function findDatabaseHostByConnection(
 }
 
 /**
+ * Return whether one stored host matches the active selection, including port when that pointer is present.
+ */
+export function isActiveDatabaseHostSelection(
+  config: Pick<NormalizedStoredConfig, "activeDatabaseHost" | "activeDatabasePort">,
+  host: Pick<StoredDatabaseHost, "name" | "port">,
+): boolean {
+  return matchesActiveHostSelection(config, host);
+}
+
+/**
  * Return the currently active host configuration, if any.
  */
 export function getActiveDatabaseHost(config: NormalizedStoredConfig): StoredDatabaseHost | undefined {
-  return config.databaseHosts.find((host) => host.name === config.activeDatabaseHost);
+  return config.databaseHosts.find((host) => matchesActiveHostSelection(config, host));
 }
 
 /**
@@ -137,6 +159,7 @@ export function setNormalizedActiveSelection(config: NormalizedStoredConfig, hos
   }
 
   config.activeDatabaseHost = host.name;
+  config.activeDatabasePort = host.port;
   config.activeDatabaseName = databaseName ?? host.databases[0]?.name;
 }
 

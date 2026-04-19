@@ -10,11 +10,11 @@ These rules are core product behavior, not optional implementation details.
 - DML, DDL, and unclassified SQL must offer `Approve Once`, `Approve All For Turn`, and `Reject`
 - the current built-in access presets are `read-only`, `select+insert+update`, `select+insert+update+delete`, and `select+insert+update+delete+ddl`
 - `UPDATE` or `DELETE` without `WHERE` should warn
-- exporting must stay inside the current working directory
-- export path checks must reject symlink or junction escapes outside the current working directory
+- generated exports and HTML result views must stay under `~/.db-chat-cli/tmp/`
 - PostgreSQL SSL must verify the server certificate when SSL is enabled
-- schema-catalog workflows that send schema metadata or search text to remote LLM or embedding APIs must require explicit confirmation first
+- schema-catalog search stays local by default; only catalog rebuilds may send merged schema metadata to a remote embedding API when embeddings are enabled
 - the model should inspect schema before making assumptions
+- agent-driven read-only preview queries should stay bounded unless the user clearly asks for all rows, a full export, or another exact row count
 
 Key enforcement points:
 
@@ -52,6 +52,7 @@ Built CLI usage:
 - help output still works
 - command descriptions are still English
 - `pnpm run dev -- <command>` still behaves correctly
+- database-backed commands still turn incomplete runtime database config into concise actionable errors instead of raw validation dumps
 
 ### If you changed config
 
@@ -59,9 +60,14 @@ Built CLI usage:
 - `init` still prompts for embedding provider, base URL, model, and API key values
 - database switching still prompts for the runtime operation-access preset, defaulting to `read-only`
 - stored database configs still omit any persisted operation-access field
+- `config db use-database <stored-name>` still works without live discovery when that database is already saved locally under the selected host
+- scoped instruction path resolution still maps to `~/.db-chat-cli/agents/<host-port>/...` with filesystem-safe lowercase fragments
 - password prompts still mask typed secrets in interactive terminals
-- `config show` still masks secrets
-- env overrides still resolve correctly and take precedence over stored config
+- `config show` still masks secrets in both the stored-config view and the resolved-runtime view
+- `config show` remains the primary diagnostic command for incomplete runtime config, and its masked stored section still prints even when the resolved runtime section is unavailable
+- shell env overrides still resolve correctly and take precedence over stored config
+- project `.env` defaults load from the current working directory without overriding stored config
+- `.env` support for `DBCHAT_FORCE_HYPERLINK` still affects terminal link rendering even though that flag is not stored in `AppConfig`
 
 ### If you changed agent or tools
 
@@ -70,10 +76,20 @@ Built CLI usage:
 - resolved plans do not remain active in the next turn after every step reaches a terminal status such as `completed`, `skipped`, or `cancelled`
 - latest query result still flows into export
 - cached query rows still respect `app.resultRowLimit`
+- temp artifacts still stay under `~/.db-chat-cli/tmp/` and startup cleanup still removes artifacts older than `app.tempArtifactRetentionDays`, which now defaults to 3 days
+- final answers still include plain-text table output when cached rows were already rendered through `render_last_result`
+- wide or tall result tables still stay readable by using dynamically sized terminal columns with truncation for overlong values, plus HTML and CSV artifact URLs when the preview must stay bounded
+- assistant-authored result tables should be removed when a separate program-rendered preview block is already being shown, so the terminal keeps one authoritative row rendering
+- `chat` and `ask` still keep program-rendered `render_last_result` table pages available in terminal output, and the Ink chat UI renders those table blocks through the UI layer
+- artifact links in terminal output still stay readable as plain text and become OSC 8 clickable links only when the active terminal supports them
 - schema-catalog search still returns useful table candidates before `describe_table`
 - destructive schema operations can verify live table names from the active database connection when the current table set matters
-- `catalog sync` and `catalog search` still require explicit confirmation before sending schema metadata or search text to remote APIs
+- runtime-scoped instruction files still reload before each `ask` or `chat` turn and are injected as a separate system message instead of being mixed into the built-in safety prompt
+- catalog rebuilds still send schema metadata to remote embedding APIs only when embeddings are enabled, without a separate confirmation prompt
+- `catalog search` still stays local by default and does not send the search text to remote APIs
+- local scoped instruction files still stay local-only and do not trigger remote API calls by themselves
 - successful schema-changing SQL still leaves a clear manual `catalog sync` follow-up notice instead of auto-refreshing the schema catalog
+- the agent loop still respects the configured LLM-round ceiling through `app.contextCompression.maxAgentIterations`
 
 ### If you changed DB execution behavior
 
@@ -88,6 +104,9 @@ Built CLI usage:
 ### If you changed schema introspection or catalog behavior
 
 - `catalog sync` still writes a refreshed snapshot for the active database
+- `catalog sync` still records the active scoped-instruction fingerprint in the refreshed snapshot
+- table-level catalog documents still carry the clipped instruction-context summary used for local retrieval and optional embeddings
+- `catalog sync` still creates missing `tables/<table>.md` files for visible live tables without overwriting existing table markdown files
 - `catalog sync` still requires a working embedding API config and rebuilds when the embedding configuration changes
 - `ask`, `chat`, and live database switches still initialize a compatible local schema catalog when the database target is entered
 - schema-catalog tools still reuse the stored local schema catalog without refreshing it automatically on later tool calls

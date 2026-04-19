@@ -4,9 +4,10 @@ import { applyResultRowLimit } from "../db/query-results.js";
 import { assessSqlSafety, ensureSingleStatement } from "../db/safety.js";
 import { shouldRefreshSchemaCatalogAfterSql } from "../schema/catalog.js";
 import { executeSqlStatement } from "../sql/execution.js";
+import { executeTool } from "../tools/registry.js";
 import { serializeToolResultForModel } from "../tools/model-payload.js";
 import type { AgentIO } from "../types/index.js";
-import { RunTest, createDatabaseStub, createTestConfig } from "./support.js";
+import { RunTest, createDatabaseStub, createTestConfig, createToolRuntimeContext } from "./support.js";
 
 export async function registerSqlExecutionTests(runTest: RunTest): Promise<void> {
   await runTest("CTE mutation statements are classified as mutations", () => {
@@ -381,6 +382,78 @@ export async function registerSqlExecutionTests(runTest: RunTest): Promise<void>
     assert.equal(executeCallCount, 1);
   });
 
+  await runTest("run_sql auto-applies the preview row limit to unbounded read-only SELECT queries", async () => {
+    const config = createTestConfig();
+    config.app.previewRowLimit = 25;
+    let executedSql = "";
+
+    const result = await executeTool(
+      "run_sql",
+      {
+        sql: "select id, created_at from orders order by created_at desc",
+        reason: "Show the latest orders",
+      },
+      createToolRuntimeContext({
+        config,
+        db: createDatabaseStub({
+          async execute(sql: string) {
+            executedSql = sql;
+            return {
+              sql,
+              operation: "SELECT",
+              rowCount: 2,
+              rows: [
+                { id: 1, created_at: new Date("2024-01-02T03:04:05.000Z") },
+                { id: 2, created_at: new Date("2024-01-02T02:04:05.000Z") },
+              ],
+              rowsTruncated: false,
+              fields: ["id", "created_at"],
+              elapsedMs: 1.2,
+            };
+          },
+        }),
+      }),
+    );
+
+    const executed = result as { sql: string; autoAppliedReadOnlyLimit?: number };
+    assert.match(executedSql, /limit 25/i);
+    assert.match(executed.sql, /limit 25/i);
+    assert.equal(executed.autoAppliedReadOnlyLimit, 25);
+  });
+
+  await runTest("run_sql skips the automatic preview limit when the reason asks for a full export", async () => {
+    const config = createTestConfig();
+    config.app.previewRowLimit = 25;
+    let executedSql = "";
+
+    await executeTool(
+      "run_sql",
+      {
+        sql: "select id, created_at from orders order by created_at desc",
+        reason: "Export all matching orders to CSV",
+      },
+      createToolRuntimeContext({
+        config,
+        db: createDatabaseStub({
+          async execute(sql: string) {
+            executedSql = sql;
+            return {
+              sql,
+              operation: "SELECT",
+              rowCount: 0,
+              rows: [],
+              rowsTruncated: false,
+              fields: ["id", "created_at"],
+              elapsedMs: 1.2,
+            };
+          },
+        }),
+      }),
+    );
+
+    assert.doesNotMatch(executedSql, /limit 25/i);
+  });
+
   await runTest("cancelled SQL payload tells the model when access policy blocked execution", () => {
     const serialized = serializeToolResultForModel(
       "run_sql",
@@ -403,7 +476,7 @@ export async function registerSqlExecutionTests(runTest: RunTest): Promise<void>
     assert.match(serialized.summary, /blocked by database access policy/i);
   });
 
-  await runTest("successful SQL payload includes a plain-text preview table", () => {
+  await runTest("successful SQL payload exposes only metadata and preview availability", () => {
     const serialized = serializeToolResultForModel(
       "run_sql",
       {
@@ -423,13 +496,34 @@ export async function registerSqlExecutionTests(runTest: RunTest): Promise<void>
     );
 
     const payload = JSON.parse(serialized.content) as Record<string, unknown>;
-    assert.equal(typeof payload.previewTable, "string");
-    assert.match(String(payload.previewTable), /email/);
-    assert.match(String(payload.previewTable), /bookmark_count/);
-    assert.match(String(payload.previewTable), /admin@123\.com/);
+    assert.equal(payload.previewAvailable, true);
+    assert.equal(payload.previewRows, undefined);
+    assert.equal(payload.previewTable, undefined);
   });
 
-  await runTest("datetime values stay readable in SQL payload previews instead of becoming empty objects", () => {
+  await runTest("successful SQL payload tells the model when a default preview limit was applied", () => {
+    const serialized = serializeToolResultForModel(
+      "run_sql",
+      {
+        status: "executed",
+        sql: "select id from users order by created_at desc limit 25",
+        operation: "SELECT",
+        rowCount: 25,
+        rows: [{ id: 1 }],
+        rowsTruncated: false,
+        fields: ["id"],
+        elapsedMs: 3.2,
+        autoAppliedReadOnlyLimit: 25,
+      },
+      createTestConfig().app,
+    );
+
+    const payload = JSON.parse(serialized.content) as Record<string, unknown>;
+    assert.equal(payload.autoAppliedReadOnlyLimit, 25);
+    assert.match(serialized.summary, /default LIMIT 25 was added/i);
+  });
+
+  await runTest("SQL payload no longer inlines datetime row previews", () => {
     const serialized = serializeToolResultForModel(
       "run_sql",
       {
@@ -449,16 +543,13 @@ export async function registerSqlExecutionTests(runTest: RunTest): Promise<void>
       createTestConfig().app,
     );
 
-    const payload = JSON.parse(serialized.content) as {
-      previewRows?: Array<Record<string, unknown>>;
-      previewTable?: string;
-    };
-    assert.equal(payload.previewRows?.[0]?.created_at, "2024-01-02 03:04:05 UTC");
-    assert.match(String(payload.previewTable), /2024-01-02 03:04:05 UTC/);
-    assert.doesNotMatch(String(payload.previewTable), /\{\}/);
+    const payload = JSON.parse(serialized.content) as Record<string, unknown>;
+    assert.equal(payload.previewAvailable, true);
+    assert.equal(payload.previewRows, undefined);
+    assert.equal(payload.previewTable, undefined);
   });
 
-  await runTest("bigint and scientific-notation values stay readable in SQL payload previews", () => {
+  await runTest("SQL payload no longer inlines bigint or decimal row previews", () => {
     const serialized = serializeToolResultForModel(
       "run_sql",
       {
@@ -479,15 +570,10 @@ export async function registerSqlExecutionTests(runTest: RunTest): Promise<void>
       createTestConfig().app,
     );
 
-    const payload = JSON.parse(serialized.content) as {
-      previewRows?: Array<Record<string, unknown>>;
-      previewTable?: string;
-    };
-    assert.equal(payload.previewRows?.[0]?.total_cents, "12345678901234567890");
-    assert.equal(payload.previewRows?.[0]?.ratio, "0.000000123");
-    assert.match(String(payload.previewTable), /12345678901234567890/);
-    assert.match(String(payload.previewTable), /0.000000123/);
-    assert.doesNotMatch(String(payload.previewTable), /e-7/i);
+    const payload = JSON.parse(serialized.content) as Record<string, unknown>;
+    assert.equal(payload.previewAvailable, true);
+    assert.equal(payload.previewRows, undefined);
+    assert.equal(payload.previewTable, undefined);
   });
 
   await runTest("wide SQL payload trims fields and can omit the text table preview", () => {
@@ -532,6 +618,7 @@ export async function registerSqlExecutionTests(runTest: RunTest): Promise<void>
     const payload = JSON.parse(serialized.content) as Record<string, unknown>;
     assert.deepEqual(payload.fields, ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"]);
     assert.equal(payload.omittedFieldCount, 1);
+    assert.equal(payload.previewAvailable, true);
     assert.equal(payload.previewTable, undefined);
   });
 

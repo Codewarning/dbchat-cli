@@ -75,6 +75,10 @@ export function formatSqlDisplayScalar(value: unknown): string | number | boolea
     return value;
   }
 
+  if (Buffer.isBuffer(value)) {
+    return value.length ? `0x${value.toString("hex")}` : "0x";
+  }
+
   if (isDateValue(value)) {
     return formatDateValue(value);
   }

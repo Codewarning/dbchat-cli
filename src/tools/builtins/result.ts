@@ -1,14 +1,18 @@
 import { z } from "zod";
 import type { QueryExecutionResult, QueryPlanResult } from "../../types/index.js";
+import { splitSqlStatements } from "../../db/safety.js";
 import {
   buildPreviewTable,
   buildPlanPreview,
   clipMiddle,
+  compactValue,
   compactRows,
   stringifyCompact,
 } from "../serialize-helpers.js";
 import { defineTool } from "../specs.js";
-import { formatRecordsTable } from "../../ui/text-table.js";
+import { buildQueryResultPreview } from "../../ui/query-result-preview.js";
+import { stripArtifactReferenceLines } from "../../ui/result-artifacts.js";
+import { formatSqlDisplayScalar } from "../../ui/value-format.js";
 
 const DEFAULT_INSPECT_LIMIT = 8;
 const MAX_INSPECT_LIMIT = 20;
@@ -27,6 +31,14 @@ const inspectLastResultSchema = z.object({
 const renderLastResultSchema = z.object({
   offset: z.number().int().min(0).optional(),
   limit: z.number().int().positive().optional(),
+  columns: z.array(z.string().min(1)).max(20).optional(),
+  expandPreview: z.boolean().optional(),
+});
+
+const searchLastResultSchema = z.object({
+  query: z.string().min(1).max(120),
+  offset: z.number().int().min(0).optional(),
+  limit: z.number().int().positive().max(10).optional(),
   columns: z.array(z.string().min(1)).max(20).optional(),
 });
 
@@ -62,12 +74,55 @@ interface RenderedCachedResult {
   rowCount: number;
   cachedRowCount: number;
   rowsTruncated: boolean;
+  autoAppliedReadOnlyLimit?: number;
   fields: string[];
   offset: number;
   limit: number;
+  expandPreview: boolean;
   rows: Record<string, unknown>[];
   renderedText: string;
   hasMoreRows: boolean;
+}
+
+interface SearchedCachedResult {
+  sql: string;
+  operation: QueryExecutionResult["operation"];
+  rowCount: number;
+  cachedRowCount: number;
+  rowsTruncated: boolean;
+  query: string;
+  fields: string[];
+  offset: number;
+  limit: number;
+  matchedRowCount: number;
+  rows: Array<Record<string, unknown> & { __rowNumber: number; __matchedFields: string[] }>;
+}
+
+function compactInspectedRows(rows: Record<string, unknown>[], fields: string[]): Record<string, unknown>[] {
+  return rows.map((row) => Object.fromEntries(fields.map((field) => [field, compactValue(row[field])])) as Record<string, unknown>);
+}
+
+function inferRequestedVisibleLimitFromSql(sql: string): number | undefined {
+  const statement = splitSqlStatements(sql)[0] ?? sql.trim();
+  const mysqlOffsetLimitMatch = statement.match(/\blimit\s+\d+\s*,\s*(\d+)\b/iu);
+  if (mysqlOffsetLimitMatch?.[1]) {
+    const parsed = Number(mysqlOffsetLimitMatch[1]);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+  }
+
+  const limitMatch = statement.match(/\blimit\s+(\d+)\b/iu);
+  if (limitMatch?.[1]) {
+    const parsed = Number(limitMatch[1]);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+  }
+
+  const fetchMatch = statement.match(/\bfetch\s+(?:first|next)\s+(\d+)\s+rows?\s+only\b/iu);
+  if (fetchMatch?.[1]) {
+    const parsed = Number(fetchMatch[1]);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+  }
+
+  return undefined;
 }
 
 function buildFocusedPlanPreview(rawPlan: unknown, maxChars: number, focus?: string): string {
@@ -89,6 +144,27 @@ function buildFocusedPlanPreview(rawPlan: unknown, maxChars: number, focus?: str
   const prefix = start > 0 ? "..." : "";
   const suffix = end < serialized.length ? "..." : "";
   return `${prefix}${serialized.slice(start, end)}${suffix}`;
+}
+
+function stringifySearchableValue(value: unknown): string {
+  if (value == null) {
+    return "";
+  }
+
+  const formattedScalar = formatSqlDisplayScalar(value);
+  if (typeof formattedScalar === "string" || typeof formattedScalar === "number" || typeof formattedScalar === "boolean") {
+    return String(formattedScalar);
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item: unknown) => stringifySearchableValue(item)).join(" ");
+  }
+
+  if (typeof formattedScalar === "object") {
+    return stringifyCompact(formattedScalar);
+  }
+
+  return String(formattedScalar);
 }
 
 export const inspectLastResultTool = defineTool(
@@ -158,8 +234,8 @@ export const inspectLastResultTool = defineTool(
   },
   (result) => {
     const inspected = result as CachedResultInspection;
-    const previewRows = compactRows(inspected.rows, inspected.limit);
-    const previewTable = buildPreviewTable(previewRows, inspected.fields);
+    const previewRows = compactInspectedRows(inspected.rows, inspected.fields);
+    const previewTable = inspected.fields.length <= 8 ? buildPreviewTable(previewRows, inspected.fields) : undefined;
     const payload = {
       sql: clipMiddle(inspected.sql, MAX_RESULT_SQL_CHARS),
       operation: inspected.operation,
@@ -170,9 +246,8 @@ export const inspectLastResultTool = defineTool(
       offset: inspected.offset,
       limit: inspected.limit,
       returnedRowCount: inspected.rows.length,
-      previewRows,
+      rows: previewRows,
       previewTable,
-      previewTruncated: inspected.rows.length > previewRows.length,
     };
 
     const fieldSummary = inspected.fields.length ? ` Fields: ${inspected.fields.join(", ")}.` : "";
@@ -187,7 +262,7 @@ export const renderLastResultTool = defineTool(
   {
     name: "render_last_result",
     description:
-      "Render a cached slice of the most recent query result into ready-to-display plain text. Use this when the user wants visible rows and you should not manually format the SQL result yourself. This tool renders up to 100 rows per call, so only paginate when the user needs more than 100 visible rows.",
+      "Render a cached slice of the most recent query result into ready-to-display plain text. Use this when the user wants visible rows and you should not manually format the SQL result yourself. Large results automatically include browser-openable HTML and matching CSV artifacts, so only paginate when the user truly needs another slice in the terminal.",
     parameters: {
       type: "object",
       additionalProperties: false,
@@ -201,7 +276,7 @@ export const renderLastResultTool = defineTool(
           type: "integer",
           minimum: 1,
           maximum: MAX_RENDER_LIMIT,
-          description: `Maximum number of cached rows to render in one page, up to ${MAX_RENDER_LIMIT}. If the user wants more than ${MAX_RENDER_LIMIT} visible rows, call this tool multiple times with different offsets.`,
+          description: `Maximum number of cached rows to render in one page, up to ${MAX_RENDER_LIMIT}. By default the terminal preview still stays compact; use expandPreview=true only when the user explicitly asked to see that many visible rows.`,
         },
         columns: {
           type: "array",
@@ -209,6 +284,11 @@ export const renderLastResultTool = defineTool(
           items: {
             type: "string",
           },
+        },
+        expandPreview: {
+          type: "boolean",
+          description:
+            "When true, expand the terminal preview up to the requested limit instead of keeping the normal compact preview. Only set this when the user explicitly asked to see all rows or another exact visible row count.",
         },
       },
     },
@@ -221,8 +301,139 @@ export const renderLastResultTool = defineTool(
     }
 
     const offset = args.offset ?? 0;
-    const requestedLimit = args.limit ?? DEFAULT_RENDER_LIMIT;
-    const limit = Math.min(requestedLimit, MAX_RENDER_LIMIT);
+    const previewRowLimit = context.config.app.tableRendering.previewRowLimit ?? DEFAULT_RENDER_LIMIT;
+    const inferredLimitFromSql = inferRequestedVisibleLimitFromSql(lastResult.sql);
+    const requestedLimit =
+      args.limit ??
+      Math.min(inferredLimitFromSql ?? previewRowLimit, previewRowLimit) ??
+      DEFAULT_RENDER_LIMIT;
+    const normalizedRequestedLimit = Math.min(requestedLimit, MAX_RENDER_LIMIT);
+    const expandPreview = args.expandPreview === true;
+    const limit = expandPreview ? normalizedRequestedLimit : Math.min(normalizedRequestedLimit, previewRowLimit);
+    const requestedColumns = Array.from(new Set(args.columns ?? []));
+    const missingColumns = requestedColumns.filter((column) => !lastResult.fields.includes(column));
+    if (missingColumns.length) {
+      throw new Error(`Unknown cached result columns: ${missingColumns.join(", ")}.`);
+    }
+
+    const requestedFieldOrder = requestedColumns.length
+      ? lastResult.fields.filter((field) => requestedColumns.includes(field))
+      : [...lastResult.fields];
+    const preview = buildQueryResultPreview(lastResult, {
+      tableRendering: {
+        ...context.config.app.tableRendering,
+        inlineRowLimit: Math.max(context.config.app.tableRendering.inlineRowLimit, limit),
+        inlineColumnLimit: requestedColumns.length
+          ? Math.max(requestedFieldOrder.length, 1)
+          : Math.max(context.config.app.tableRendering.inlineColumnLimit, 1),
+        previewRowLimit: limit,
+      },
+      offset,
+      limit,
+      columns: requestedColumns,
+    });
+    const renderedLines = [preview.renderedText];
+
+    if (requestedLimit > MAX_RENDER_LIMIT) {
+      renderedLines.push(`Requested limit ${requestedLimit} exceeded the per-call maximum, so this page was capped at ${MAX_RENDER_LIMIT} rows.`);
+    }
+    if (!expandPreview && normalizedRequestedLimit > limit) {
+      renderedLines.push(`Requested ${normalizedRequestedLimit} visible rows, but the terminal preview stayed compact at ${limit} rows.`);
+    }
+
+    context.pushDisplayBlock({
+      kind: "result_table",
+      title: "Result Preview",
+      body: stripArtifactReferenceLines(preview.renderedText),
+      table: {
+        fields: preview.fields,
+        rows: preview.rows,
+      },
+    });
+    context.io.log(`Rendering cached result rows ${preview.rows.length ? offset + 1 : 0}-${preview.rows.length ? offset + preview.rows.length : 0}`);
+    return {
+      sql: lastResult.sql,
+      operation: lastResult.operation,
+      rowCount: lastResult.rowCount,
+      cachedRowCount: lastResult.rows.length,
+      rowsTruncated: lastResult.rowsTruncated,
+      autoAppliedReadOnlyLimit: lastResult.autoAppliedReadOnlyLimit,
+      fields: preview.fields,
+      offset,
+      limit,
+      expandPreview,
+      rows: compactRows(preview.rows, preview.rows.length),
+      renderedText: renderedLines.join("\n"),
+      hasMoreRows: preview.hasMoreRows,
+    } satisfies RenderedCachedResult;
+  },
+  (result) => {
+    const rendered = result as RenderedCachedResult;
+    const payload = {
+      sql: clipMiddle(rendered.sql, MAX_RESULT_SQL_CHARS),
+      operation: rendered.operation,
+      rowCount: rendered.rowCount,
+      cachedRowCount: rendered.cachedRowCount,
+      rowsTruncated: rendered.rowsTruncated,
+      offset: rendered.offset,
+      limit: rendered.limit,
+      returnedRowCount: rendered.rows.length,
+      fields: rendered.fields,
+      expandPreview: rendered.expandPreview,
+      hasMoreRows: rendered.hasMoreRows,
+      renderedInTerminal: true,
+    };
+    return {
+      content: stringifyCompact(payload),
+      summary: `Cached result rendered: ${rendered.rows.length} rows from offset ${rendered.offset}.`,
+    };
+  },
+);
+
+export const searchLastResultTool = defineTool(
+  {
+    name: "search_last_result",
+    description:
+      "Search the cached rows of the most recent query result without rerunning SQL. Use this when you need to locate a specific record or value from the current result before deciding what to say or do next.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        query: {
+          type: "string",
+          description: "Case-insensitive substring to search for inside cached row values.",
+        },
+        offset: {
+          type: "integer",
+          minimum: 0,
+          description: "Zero-based match offset into the search results.",
+        },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          maximum: 10,
+          description: "Maximum number of matching rows to return, up to 10.",
+        },
+        columns: {
+          type: "array",
+          description: "Optional exact column names to search within and return.",
+          items: {
+            type: "string",
+          },
+        },
+      },
+      required: ["query"],
+    },
+  },
+  searchLastResultSchema,
+  async (args, context) => {
+    const lastResult = context.getLastResult();
+    if (!lastResult) {
+      throw new Error("There is no cached query result to search.");
+    }
+
+    const offset = args.offset ?? 0;
+    const limit = Math.min(args.limit ?? 5, 10);
     const requestedColumns = Array.from(new Set(args.columns ?? []));
     const missingColumns = requestedColumns.filter((column) => !lastResult.fields.includes(column));
     if (missingColumns.length) {
@@ -232,50 +443,68 @@ export const renderLastResultTool = defineTool(
     const fields = requestedColumns.length
       ? lastResult.fields.filter((field) => requestedColumns.includes(field))
       : [...lastResult.fields];
-    const rows = compactRows(
-      lastResult.rows.slice(offset, offset + limit).map((row) =>
-        Object.fromEntries(fields.map((field) => [field, row[field]])),
-      ),
-      limit,
-    );
-    const endRow = rows.length ? offset + rows.length : offset;
-    const table = rows.length ? formatRecordsTable(rows, fields) : "(none)";
-    const hasMoreRows = offset + rows.length < lastResult.rows.length;
-    const lines = [
-      `SQL result rows ${rows.length ? offset + 1 : 0}-${endRow} of ${lastResult.rowCount}:`,
-      table,
-    ];
+    const normalizedQuery = args.query.trim().toLowerCase();
+    const matches = lastResult.rows.flatMap((row, index) => {
+      const matchedFields = fields.filter((field) => stringifySearchableValue(row[field]).toLowerCase().includes(normalizedQuery));
+      if (!matchedFields.length) {
+        return [];
+      }
 
-    if (requestedLimit > MAX_RENDER_LIMIT) {
-      lines.push(`Requested limit ${requestedLimit} exceeded the per-call maximum, so this page was capped at ${MAX_RENDER_LIMIT} rows.`);
-    }
-
-    if (hasMoreRows) {
-      lines.push(`More cached rows are available. Call render_last_result with offset=${offset + rows.length} to continue.`);
-    } else if (lastResult.rowsTruncated && lastResult.rowCount > lastResult.rows.length) {
-      lines.push(`The in-memory cache contains ${lastResult.rows.length} rows, but the query returned ${lastResult.rowCount} rows in total.`);
-    }
-
-    context.io.log(`Rendering cached result rows ${rows.length ? offset + 1 : 0}-${endRow}`);
+      return [
+        {
+          __rowNumber: index + 1,
+          __matchedFields: matchedFields,
+          ...Object.fromEntries(fields.map((field) => [field, row[field]])),
+        },
+      ];
+    });
+    const rows = matches.slice(offset, offset + limit);
+    context.io.log(`Searching cached result for '${args.query}' returned ${matches.length} matches`);
     return {
       sql: lastResult.sql,
       operation: lastResult.operation,
       rowCount: lastResult.rowCount,
       cachedRowCount: lastResult.rows.length,
       rowsTruncated: lastResult.rowsTruncated,
+      query: args.query,
       fields,
       offset,
       limit,
+      matchedRowCount: matches.length,
       rows,
-      renderedText: lines.join("\n"),
-      hasMoreRows,
-    } satisfies RenderedCachedResult;
+    } satisfies SearchedCachedResult;
   },
   (result) => {
-    const rendered = result as RenderedCachedResult;
+    const searched = result as SearchedCachedResult;
+    const previewRows = compactRows(
+      searched.rows.map((row) => ({
+        rowNumber: row.__rowNumber,
+        matchedFields: row.__matchedFields.join(", "),
+        ...Object.fromEntries(searched.fields.map((field) => [field, row[field]])),
+      })),
+      searched.limit,
+    );
+    const previewTable = buildPreviewTable(previewRows, ["rowNumber", "matchedFields", ...searched.fields]);
+    const payload = {
+      sql: clipMiddle(searched.sql, MAX_RESULT_SQL_CHARS),
+      operation: searched.operation,
+      rowCount: searched.rowCount,
+      cachedRowCount: searched.cachedRowCount,
+      rowsTruncated: searched.rowsTruncated,
+      query: searched.query,
+      fields: searched.fields,
+      offset: searched.offset,
+      limit: searched.limit,
+      matchedRowCount: searched.matchedRowCount,
+      returnedRowCount: searched.rows.length,
+      previewRows,
+      previewTable,
+      previewTruncated: searched.rows.length > previewRows.length,
+    };
+
     return {
-      content: rendered.renderedText,
-      summary: `Cached result rendered: ${rendered.rows.length} rows from offset ${rendered.offset}.`,
+      content: stringifyCompact(payload),
+      summary: `Cached result search: ${payload.matchedRowCount} matches for '${searched.query}'.`,
     };
   },
 );

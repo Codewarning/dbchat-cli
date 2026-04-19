@@ -73,7 +73,7 @@ export function registerCommands(program: Command): void {
     .action((parts: string[], options: { limit: string }) => handleCatalogSearchCommand(parts.join(" "), Number(options.limit)));
 
   const configCommand = program.command("config").description("Inspect local configuration");
-  configCommand.command("show").description("Show the current configuration with secrets masked").action(handleConfigShowCommand);
+  configCommand.command("show").description("Show stored and resolved configuration with secrets masked").action(handleConfigShowCommand);
   const embeddingConfigCommand = configCommand.command("embedding").description("Manage the stored embedding API configuration");
   embeddingConfigCommand.command("update").description("Update the stored embedding API configuration").action(handleConfigEmbeddingUpdateCommand);
 

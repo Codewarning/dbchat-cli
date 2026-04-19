@@ -6,10 +6,12 @@ import { buildSessionMessages } from "../agent/message-builder.js";
 import { isPlanResolved } from "../agent/plan.js";
 import { buildContextPrompt, buildSystemPrompt } from "../agent/prompts.js";
 import { classifyUserRequestExecutionIntent } from "../agent/session.js";
-import { buildContextPromptProfile, compactAssistantContentForHistory } from "../agent/session-policy.js";
+import { buildContextPromptProfile, buildFinalAgentContent, compactAssistantContentForHistory } from "../agent/session-policy.js";
+import { resolveStructuredEntryTable } from "../repl/chat-entry-view.js";
 import { selectNextComposerHistoryEntry, selectPreviousComposerHistoryEntry } from "../repl/input-history.js";
 import { parseSchemaCommandArgs, parseSlashCommand } from "../repl/slash-commands.js";
 import { findCatalogTable, suggestCatalogTableNames } from "../schema/catalog.js";
+import { formatRecordsTable } from "../ui/text-table.js";
 import { RunTest, createDatabaseStub, createTestConfig, createTestIo } from "./support.js";
 
 export async function registerAgentAndReplTests(runTest: RunTest): Promise<void> {
@@ -29,6 +31,202 @@ export async function registerAgentAndReplTests(runTest: RunTest): Promise<void>
     assert.equal(history.getCurrentTurn(), null);
     assert.equal(history.getRecentCompletedTurns().length, 0);
   });
+
+  await runTest("agent session skips duplicate render_last_result calls for the same cached slice", async () => {
+    const logs: string[] = [];
+    const io = {
+      ...createTestIo(),
+      log(message: string) {
+        logs.push(message);
+      },
+    };
+    const session = new AgentSession(createTestConfig(), createDatabaseStub(), io);
+    (session as unknown as { lastResult: NonNullable<ReturnType<AgentSession["getLastResult"]>> }).lastResult = {
+      sql: "select id, email, created_time, updated_time, enabled from sys_user where deleted = false order by updated_time desc limit 10",
+      operation: "SELECT",
+      rowCount: 4,
+      rows: [
+        { id: 1, email: "a@example.com", created_time: "2026-04-01 10:00:00", updated_time: "2026-04-17 10:00:00", enabled: true },
+        { id: 2, email: "b@example.com", created_time: "2026-04-02 10:00:00", updated_time: "2026-04-16 10:00:00", enabled: true },
+        { id: 3, email: "c@example.com", created_time: "2026-04-03 10:00:00", updated_time: "2026-04-15 10:00:00", enabled: false },
+        { id: 4, email: "d@example.com", created_time: "2026-04-04 10:00:00", updated_time: "2026-04-14 10:00:00", enabled: true },
+      ],
+      rowsTruncated: false,
+      fields: ["id", "email", "created_time", "updated_time", "enabled"],
+      elapsedMs: 5,
+    };
+
+    let completionCalls = 0;
+    (session as unknown as { llm: { complete: () => Promise<unknown> } }).llm = {
+      async complete() {
+        completionCalls += 1;
+        if (completionCalls === 1) {
+          return {
+            content: null,
+            tool_calls: [
+              {
+                id: "call_1",
+                type: "function",
+                function: {
+                  name: "render_last_result",
+                  arguments: JSON.stringify({ offset: 0, limit: 4 }),
+                },
+              },
+            ],
+          };
+        }
+
+        if (completionCalls === 2) {
+          return {
+            content: null,
+            tool_calls: [
+              {
+                id: "call_2",
+                type: "function",
+                function: {
+                  name: "render_last_result",
+                  arguments: JSON.stringify({ offset: 0, limit: 4 }),
+                },
+              },
+            ],
+          };
+        }
+
+        return {
+          content: "The latest users are already shown in the terminal preview.",
+        };
+      },
+    };
+
+    const result = await session.run("查询最近更新的用户信息");
+
+    assert.equal(completionCalls, 3);
+    assert.equal(result.displayBlocks.length, 1);
+    assert.match(result.content, /already shown in the terminal preview/i);
+    assert.equal(logs.filter((line) => /Rendering cached result rows 1-4/.test(line)).length, 1);
+  });
+
+  await runTest("agent session drops stale result previews after a later SQL result replaces them", async () => {
+    const session = new AgentSession(
+      createTestConfig(),
+      createDatabaseStub({
+        async execute(sql) {
+          if (/select content_type from cs_cms_content_article/i.test(sql)) {
+            return {
+              sql,
+              operation: "SELECT",
+              rowCount: 1,
+              rows: [{ content_type: "html" }],
+              rowsTruncated: false,
+              fields: ["content_type"],
+              elapsedMs: 2,
+            };
+          }
+
+          if (/select article_id, title, content_type from cs_cms_content_article/i.test(sql)) {
+            return {
+              sql,
+              operation: "SELECT",
+              rowCount: 2,
+              rows: [
+                { article_id: 842945, title: "Winter storage wisdom", content_type: "html" },
+                { article_id: 842972, title: "Morning frost flowers", content_type: "html" },
+              ],
+              rowsTruncated: false,
+              fields: ["article_id", "title", "content_type"],
+              elapsedMs: 3,
+            };
+          }
+
+          throw new Error(`Unexpected SQL in test: ${sql}`);
+        },
+      }),
+      createTestIo(),
+    );
+
+    let completionCalls = 0;
+    (session as unknown as { llm: { complete: () => Promise<unknown> } }).llm = {
+      async complete() {
+        completionCalls += 1;
+        switch (completionCalls) {
+          case 1:
+            return {
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_1",
+                  type: "function",
+                  function: {
+                    name: "run_sql",
+                    arguments: JSON.stringify({
+                      sql: "select content_type from cs_cms_content_article where content_type = 'html' limit 1",
+                      reason: "Verify the stored article content type.",
+                    }),
+                  },
+                },
+              ],
+            };
+          case 2:
+            return {
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_2",
+                  type: "function",
+                  function: {
+                    name: "render_last_result",
+                    arguments: JSON.stringify({ offset: 0, limit: 1 }),
+                  },
+                },
+              ],
+            };
+          case 3:
+            return {
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_3",
+                  type: "function",
+                  function: {
+                    name: "run_sql",
+                    arguments: JSON.stringify({
+                      sql: "select article_id, title, content_type from cs_cms_content_article where content_type = 'html' order by article_id limit 2",
+                      reason: "Load the actual html articles to answer the user.",
+                    }),
+                  },
+                },
+              ],
+            };
+          case 4:
+            return {
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_4",
+                  type: "function",
+                  function: {
+                    name: "render_last_result",
+                    arguments: JSON.stringify({ offset: 0, limit: 2 }),
+                  },
+                },
+              ],
+            };
+          default:
+            return {
+              content: "I found html articles and showed the final result preview.",
+            };
+        }
+      },
+    };
+
+    const result = await session.run("show html article content");
+
+    assert.equal(result.displayBlocks.length, 1);
+    assert.match(result.displayBlocks[0]?.body ?? "", /SQL result rows 1-2 of 2:/);
+    assert.match(result.displayBlocks[0]?.body ?? "", /article_id/);
+    assert.doesNotMatch(result.displayBlocks[0]?.body ?? "", /SQL result rows 1-1 of 1:/);
+  });
+
 
   await runTest("request intent classification prefers actual results for Chinese query wording", () => {
     assert.equal(classifyUserRequestExecutionIntent("查询用户信息及其分组数、标签数、书签数"), "read_only_results");
@@ -208,6 +406,51 @@ export async function registerAgentAndReplTests(runTest: RunTest): Promise<void>
     assert.doesNotMatch(prompt, /e-7/i);
   });
 
+  await runTest("latest result summaries expose artifact availability without leaking file URLs", () => {
+    const prompt = buildContextPrompt(
+      [],
+      {
+        sql: "select id, email from users limit 2",
+        operation: "SELECT",
+        rowCount: 2,
+        rows: [
+          { id: 1, email: "a@example.com" },
+          { id: 2, email: "b@example.com" },
+        ],
+        rowsTruncated: false,
+        fields: ["id", "email"],
+        elapsedMs: 4,
+        htmlArtifact: {
+          outputPath: "/tmp/dbchat/result.html",
+          fileUrl: "file:///tmp/dbchat/result.html",
+          csvOutputPath: "/tmp/dbchat/result.csv",
+          csvFileUrl: "file:///tmp/dbchat/result.csv",
+          generatedAt: "2026-04-16T00:00:00.000Z",
+          cachedRowCount: 2,
+          rowCount: 2,
+          fieldCount: 2,
+        },
+      },
+      createSessionContextMemory(),
+      {
+        kind: "export_follow_up",
+        includePriorRawTurns: true,
+        includeArchivedConversation: false,
+        includeLastSchemaSummary: false,
+        includeDescribedTables: false,
+        includeRecentQueryMemory: false,
+        includeLastExplainSummary: false,
+        includeLastExportSummary: false,
+        includeLastResultSummary: true,
+        includeLastResultTablePreview: false,
+      },
+    );
+
+    assert.match(prompt, /"htmlArtifactAvailable":true/);
+    assert.doesNotMatch(prompt, /file:\/\/\/tmp\/dbchat\/result\.html/);
+    assert.doesNotMatch(prompt, /file:\/\/\/tmp\/dbchat\/result\.csv/);
+  });
+
   await runTest("message builder can skip prior raw turns for standalone requests", () => {
     const previousTurn = createConversationTurn("show users");
     previousTurn.messages.push({
@@ -323,6 +566,331 @@ export async function registerAgentAndReplTests(runTest: RunTest): Promise<void>
     assert.match(compacted, /\.\.\.$/);
   });
 
+  await runTest("final agent output appends rendered result tables when the assistant only returns a prose summary", () => {
+    const finalContent = buildFinalAgentContent({
+      responseContent: "Query completed. Returned the latest rows from users.",
+      lastToolFailure: null,
+      toolCallsThisTurn: 2,
+      currentTurnMessages: [
+        { role: "user", content: "show users" },
+        {
+          role: "tool",
+          tool_call_id: "call_1",
+          content: "SQL result rows 1-2 of 2:\nid | email\n---+----------------\n1  | a@example.com\n2  | b@example.com",
+        },
+      ],
+      lastResult: null,
+      appConfig: createTestConfig().app,
+    });
+
+    assert.match(finalContent, /Query completed\./);
+    assert.match(finalContent, /SQL result rows 1-2 of 2:/);
+    assert.match(finalContent, /a@example\.com/);
+  });
+
+  await runTest("final agent output preserves assistant-authored markdown tables", () => {
+    const finalContent = buildFinalAgentContent({
+      responseContent:
+        "Found the latest rows from users:\n\n| id | email |\n| --- | --- |\n| 1 | a@example.com |\n| 2 | b@example.com |",
+      lastToolFailure: null,
+      toolCallsThisTurn: 2,
+      currentTurnMessages: [
+        { role: "user", content: "show users" },
+        {
+          role: "tool",
+          tool_call_id: "call_1",
+          content: "SQL result rows 1-2 of 2:\nid | email\n---+----------------\n1  | a@example.com\n2  | b@example.com",
+        },
+      ],
+      lastResult: null,
+      appConfig: createTestConfig().app,
+    });
+
+    assert.match(finalContent, /\| id \| email \|/);
+    assert.doesNotMatch(finalContent, /SQL result rows 1-2 of 2:/);
+  });
+
+  await runTest("final agent output strips assistant-authored markdown result tables when a rendered preview will be shown separately", () => {
+    const finalContent = buildFinalAgentContent({
+      responseContent: [
+        "Query completed. Here is a quick preview:",
+        "",
+        "| id | email |",
+        "| --- | --- |",
+        "| 1 | a@example.com |",
+        "| 2 | b@example.com |",
+        "",
+        "Open the preview block below for the program-rendered rows.",
+      ].join("\n"),
+      lastToolFailure: null,
+      toolCallsThisTurn: 2,
+      currentTurnMessages: [{ role: "user", content: "show users" }],
+      lastResult: {
+        sql: "select id, email from users limit 2",
+        operation: "SELECT",
+        rowCount: 2,
+        rows: [
+          { id: 1, email: "a@example.com" },
+          { id: 2, email: "b@example.com" },
+        ],
+        rowsTruncated: false,
+        fields: ["id", "email"],
+        elapsedMs: 3,
+      },
+      appConfig: createTestConfig().app,
+      displayBlocks: [
+        {
+          kind: "result_table",
+          title: "Result Preview",
+          body: "SQL result rows 1-2 of 2:\nid | email\n---+----------------\n1  | a@example.com\n2  | b@example.com",
+        },
+      ],
+    });
+
+    assert.match(finalContent, /Query completed/i);
+    assert.match(finalContent, /program-rendered rows/i);
+    assert.doesNotMatch(finalContent, /\| id \| email \|/);
+    assert.doesNotMatch(finalContent, /\| 1 \| a@example\.com \|/);
+  });
+
+
+  await runTest("final agent output no longer re-adds artifact address lines when the assistant copied only the table body", () => {
+    const finalContent = buildFinalAgentContent({
+      responseContent:
+        "已查询最近七天创建的订单数据，共找到100条记录。以下是部分结果预览：\n\nid | email\n---+----------------\n1  | a@example.com",
+      lastToolFailure: null,
+      toolCallsThisTurn: 2,
+      currentTurnMessages: [
+        { role: "user", content: "show users" },
+        {
+          role: "tool",
+          tool_call_id: "call_1",
+          content:
+            "SQL result rows 1-1 of 1:\nid | email\n---+----------------\n1  | a@example.com\nOpen full table in a browser: file:///tmp/dbchat/result.html\nHTML file: /tmp/dbchat/result.html\nOpen the same cached rows as CSV: file:///tmp/dbchat/result.csv\nCSV file: /tmp/dbchat/result.csv\nMore cached rows are available. Open the HTML view for the full cached result or call render_last_result with offset=10 to continue.",
+        },
+      ],
+      lastResult: null,
+      appConfig: createTestConfig().app,
+    });
+
+    assert.match(finalContent, /a@example\.com/);
+    assert.doesNotMatch(finalContent, /Open full table in a browser:/);
+    assert.doesNotMatch(finalContent, /Open the same cached rows as CSV:/);
+    assert.doesNotMatch(finalContent, /^HTML file:/m);
+    assert.doesNotMatch(finalContent, /^CSV file:/m);
+    assert.match(finalContent, /More cached rows are available/i);
+  });
+
+  await runTest("final agent output does not duplicate artifact links when the assistant already referenced them", () => {
+    const finalContent = buildFinalAgentContent({
+      responseContent:
+        "id | email\n---+----------------\n1  | a@example.com\n\n完整结果已缓存，可通过以下链接查看：\nHTML 视图: file:///C:/tmp/dbchat/result.html\nCSV 文件: C:\\tmp\\dbchat\\result.csv",
+      lastToolFailure: null,
+      toolCallsThisTurn: 2,
+      currentTurnMessages: [
+        { role: "user", content: "show users" },
+        {
+          role: "tool",
+          tool_call_id: "call_1",
+          content:
+            "SQL result rows 1-1 of 1:\nid | email\n---+----------------\n1  | a@example.com\nOpen full table in a browser: file:///C:/tmp/dbchat/result.html\nHTML file: C:\\tmp\\dbchat\\result.html\nOpen the same cached rows as CSV: file:///C:/tmp/dbchat/result.csv\nCSV file: C:\\tmp\\dbchat\\result.csv\nMore cached rows are available. Open the HTML view for the full cached result or call render_last_result with offset=10 to continue.",
+        },
+      ],
+      lastResult: null,
+      appConfig: createTestConfig().app,
+    });
+
+    assert.doesNotMatch(finalContent, /file:\/\/\/C:\/tmp\/dbchat\/result\.html/);
+    assert.doesNotMatch(finalContent, /C:\\tmp\\dbchat\\result\.csv/);
+    assert.doesNotMatch(finalContent, /Open full table in a browser:/);
+    assert.doesNotMatch(finalContent, /Open the same cached rows as CSV:/);
+    assert.doesNotMatch(finalContent, /^HTML file:/m);
+    assert.doesNotMatch(finalContent, /^CSV file:/m);
+  });
+
+  await runTest("final agent output strips markdown artifact links instead of exposing file paths", () => {
+    const finalContent = buildFinalAgentContent({
+      responseContent:
+        "查询执行成功，结果已缓存。您可以点击以下链接查看完整结果：\n[HTML 视图](file:///C:/tmp/dbchat/result.html)\n[CSV 文件](file:///C:/tmp/dbchat/result.csv)",
+      lastToolFailure: null,
+      toolCallsThisTurn: 2,
+      currentTurnMessages: [
+        { role: "user", content: "show users" },
+        {
+          role: "tool",
+          tool_call_id: "call_1",
+          content:
+            "SQL result rows 1-1 of 1:\nid | email\n---+----------------\n1  | a@example.com\nOpen full table in a browser: file:///C:/tmp/dbchat/result.html\nHTML file: C:\\tmp\\dbchat\\result.html\nOpen the same cached rows as CSV: file:///C:/tmp/dbchat/result.csv\nCSV file: C:\\tmp\\dbchat\\result.csv\nMore cached rows are available. Open the HTML view for the full cached result or call render_last_result with offset=10 to continue.",
+        },
+      ],
+      lastResult: null,
+      appConfig: createTestConfig().app,
+    });
+
+    assert.doesNotMatch(finalContent, /file:\/\/\/C:\/tmp\/dbchat\/result\.html/);
+    assert.doesNotMatch(finalContent, /file:\/\/\/C:\/tmp\/dbchat\/result\.csv/);
+    assert.doesNotMatch(finalContent, /\[HTML 视图\]\(/);
+    assert.doesNotMatch(finalContent, /Open full table in a browser:/);
+  });
+
+  await runTest("final agent output keeps prose only when a result preview will be shown separately", () => {
+    const finalContent = buildFinalAgentContent({
+      responseContent: "Query completed.",
+      lastToolFailure: null,
+      toolCallsThisTurn: 1,
+      currentTurnMessages: [{ role: "user", content: "show users" }],
+      lastResult: {
+        sql: "select id, email from users limit 2",
+        operation: "SELECT",
+        rowCount: 2,
+        rows: [
+          { id: 1, email: "a@example.com" },
+          { id: 2, email: "b@example.com" },
+        ],
+        rowsTruncated: false,
+        fields: ["id", "email"],
+        elapsedMs: 3,
+        autoAppliedReadOnlyLimit: 2,
+      },
+      appConfig: createTestConfig().app,
+    });
+
+    assert.match(finalContent, /Query completed\./);
+    assert.doesNotMatch(finalContent, /SQL result rows 1-2 of 2:/);
+    assert.doesNotMatch(finalContent, /a@example\.com/);
+  });
+
+  await runTest("final agent output no longer embeds wide fallback result tables", () => {
+    const finalContent = buildFinalAgentContent({
+      responseContent: "Query completed.",
+      lastToolFailure: null,
+      toolCallsThisTurn: 1,
+      currentTurnMessages: [{ role: "user", content: "show schedule info" }],
+      lastResult: {
+        sql: "select ... from schedule_info limit 1",
+        operation: "SELECT",
+        rowCount: 1,
+        rows: [
+          {
+            id: 1,
+            shop_id: 2,
+            open_user_id: "u-1",
+            open_user_name: "Alice",
+            open_user_phone: "1234567890",
+            group_id: 3,
+            task_id: "task-1",
+            order_status: 1,
+            merchant_code: "DOMINO",
+            work_date: "2026-04-16",
+            rest: false,
+            create_at: "2026-04-16 10:00:00",
+            update_at: "2026-04-16 10:05:00",
+          },
+        ],
+        rowsTruncated: false,
+        fields: [
+          "id",
+          "shop_id",
+          "open_user_id",
+          "open_user_name",
+          "open_user_phone",
+          "group_id",
+          "task_id",
+          "order_status",
+          "merchant_code",
+          "work_date",
+          "rest",
+          "create_at",
+          "update_at",
+        ],
+        elapsedMs: 3,
+      },
+      appConfig: createTestConfig().app,
+    });
+
+    assert.equal(finalContent, "Query completed.");
+  });
+
+  await runTest("final agent output strips manual field:value rows when a rendered preview will be shown separately", () => {
+    const finalContent = buildFinalAgentContent({
+      responseContent: [
+        "I queried the most-visited bookmark. Result below:",
+        "id: 1",
+        "title: Home",
+        "url: https://example.com",
+        "visit_count: 1234",
+        "",
+        "This bookmark currently has the highest visit count.",
+      ].join("\n"),
+      lastToolFailure: null,
+      toolCallsThisTurn: 2,
+      currentTurnMessages: [{ role: "user", content: "show the most-visited bookmark" }],
+      lastResult: {
+        sql: "select id, title, url, visit_count from bm_bookmark order by visit_count desc limit 1",
+        operation: "SELECT",
+        rowCount: 1,
+        rows: [{ id: 2014690613985214466n, title: "docker-compose部署完整java应用", url: "https://blog.example", visit_count: 4 }],
+        rowsTruncated: false,
+        fields: ["id", "title", "url", "visit_count"],
+        elapsedMs: 3,
+      },
+      appConfig: createTestConfig().app,
+      displayBlocks: [
+        {
+          kind: "result_table",
+          title: "Result Preview",
+          body: "SQL result rows 1-1 of 1:\nid | title | url | visit_count\n---+---+---+---\n2014690613985214466 | docker-compose部署完整java应用 | https://blog.example | 4",
+        },
+      ],
+    });
+
+    assert.match(finalContent, /I queried the most-visited bookmark/i);
+    assert.match(finalContent, /highest visit count/i);
+    assert.doesNotMatch(finalContent, /^id:/m);
+    assert.doesNotMatch(finalContent, /^title:/m);
+    assert.doesNotMatch(finalContent, /^url:/m);
+    assert.doesNotMatch(finalContent, /^visit_count:/m);
+  });
+
+  await runTest("assistant preview entries resolve structured tables before plain assistant text rendering", () => {
+    const fields = ["id", "title", "created_by", "updated_by", "deleted"];
+    const rows = [
+      {
+        id: 1,
+        title: "home",
+        created_by: "system",
+        updated_by: "system",
+        deleted: false,
+      },
+    ];
+    const entry = {
+      id: "entry-1",
+      title: "Result Preview",
+      body: [
+        "SQL result rows 1-1 of 1:",
+        "Showing 5 of 15 columns in the terminal preview. Open the HTML view for all columns.",
+        formatRecordsTable(rows, fields),
+      ].join("\n"),
+      tone: "assistant" as const,
+      meta: {
+        table: {
+          fields,
+          rows,
+        },
+      },
+    };
+
+    const structuredTable = resolveStructuredEntryTable(entry);
+    assert.ok(structuredTable);
+    assert.deepEqual(structuredTable?.fields, fields);
+    assert.deepEqual(structuredTable?.rows, rows);
+    assert.deepEqual(structuredTable?.beforeLines, [
+      "SQL result rows 1-1 of 1:",
+      "Showing 5 of 15 columns in the terminal preview. Open the HTML view for all columns.",
+    ]);
+    assert.deepEqual(structuredTable?.afterLines, []);
+  });
+
   await runTest("archived turn summary prioritizes outcomes over raw tool calls", () => {
     const turn = createConversationTurn("show top users");
     turn.summaryLines.push("Request intent: read_only_results");
@@ -369,7 +937,7 @@ export async function registerAgentAndReplTests(runTest: RunTest): Promise<void>
 
   await runTest("catalog helpers resolve exact tables and suggest similar names", () => {
     const catalog = {
-      version: 5,
+      version: 9,
       dialect: "postgres" as const,
       host: "localhost",
       port: 5432,
@@ -377,52 +945,71 @@ export async function registerAgentAndReplTests(runTest: RunTest): Promise<void>
       schema: "public",
       generatedAt: new Date().toISOString(),
       tableCount: 4,
+      documentCount: 0,
+      instructionFingerprint: null,
       embeddingModelId: "embedding-model",
       tables: [
         {
           tableName: "sys_user",
           schemaHash: "a",
           summaryText: "users table",
+          instructionContext: undefined,
           description: "Stores users.",
           tags: ["user", "account", "auth"],
+          aliases: [],
+          examples: [],
           embeddingText: "sys_user",
           embeddingVector: [0.1, 0.2],
           columns: [
             { name: "id", dataType: "integer", isNullable: false, defaultValue: null },
             { name: "email", dataType: "text", isNullable: false, defaultValue: null },
           ],
+          relations: [],
         },
         {
           tableName: "bm_group",
           schemaHash: "b",
           summaryText: "groups table",
+          instructionContext: undefined,
           description: "Stores groups.",
           tags: ["group", "bookmark", "sharing"],
+          aliases: [],
+          examples: [],
           embeddingText: "bm_group",
           embeddingVector: [0.2, 0.1],
           columns: [{ name: "user_id", dataType: "integer", isNullable: false, defaultValue: null }],
+          relations: [],
         },
         {
           tableName: "bm_tag",
           schemaHash: "c",
           summaryText: "tags table",
+          instructionContext: undefined,
           description: "Stores tags.",
           tags: ["tag", "bookmark", "label"],
+          aliases: [],
+          examples: [],
           embeddingText: "bm_tag",
           embeddingVector: [0.2, 0.2],
           columns: [{ name: "user_id", dataType: "integer", isNullable: false, defaultValue: null }],
+          relations: [],
         },
         {
           tableName: "bm_bookmark",
           schemaHash: "d",
           summaryText: "bookmarks table",
+          instructionContext: undefined,
           description: "Stores bookmarks.",
           tags: ["bookmark", "link", "save"],
+          aliases: [],
+          examples: [],
           embeddingText: "bm_bookmark",
           embeddingVector: [0.3, 0.1],
           columns: [{ name: "user_id", dataType: "integer", isNullable: false, defaultValue: null }],
+          relations: [],
         },
       ],
+      documents: [],
     };
 
     assert.equal(findCatalogTable(catalog, "SYS_USER")?.tableName, "sys_user");
@@ -510,15 +1097,32 @@ export async function registerAgentAndReplTests(runTest: RunTest): Promise<void>
 
   await runTest("system prompt allows plain-text tables for query results", () => {
     const prompt = buildSystemPrompt(createTestConfig());
+    assert.match(prompt, /Match the user's language/i);
+    assert.doesNotMatch(prompt, /Write all user-visible output in English plain CLI text/i);
     assert.match(prompt, /plain monospace text tables/i);
     assert.match(prompt, /prefer a compact plain-text table preview over prose alone/i);
     assert.match(prompt, /stop searching and explicitly say the current schema likely does not contain it/i);
     assert.match(prompt, /Do not repeatedly inspect the same history item without a new reason/i);
     assert.match(prompt, /date, datetime, timestamp, or time values, preserve them as readable strings/i);
     assert.match(prompt, /bigint, decimal, numeric, or scientific-notation values, preserve readable exact strings or expanded decimals/i);
+    assert.match(prompt, /Program-rendered query results may use plain monospace text tables/i);
+    assert.match(prompt, /prefer inspect_last_result, search_last_result, render_last_result/i);
     assert.match(prompt, /call render_last_result and reuse its rendered table text instead of manually formatting rows yourself/i);
-    assert.match(prompt, /Infer the user's requested visible row limit from the request or the SQL LIMIT when it is explicit/i);
-    assert.match(prompt, /If the query returned no more than that requested visible limit, prefer one render_last_result call with that limit instead of splitting the output/i);
+    assert.match(prompt, /Treat render_last_result as a terminal-display tool/i);
+    assert.match(prompt, /Do not manually restate SQL row values or build your own tables from SQL tool metadata/i);
+    assert.match(prompt, /Never author Markdown tables, plain-text row tables, or copied row dumps for SQL results/i);
+    assert.match(prompt, /keep your own reply focused on summary, explanation, and next-step reasoning/i);
+    assert.match(prompt, /use search_last_result or inspect_last_result instead of guessing from memory/i);
+    assert.match(prompt, /CSV files are generated automatically alongside HTML result views/i);
+    assert.match(prompt, /Never use SELECT \* in generated SQL/i);
+    assert.match(prompt, /spell out the columns explicitly/i);
+    assert.match(prompt, /avoid selecting obvious secrets or credentials such as password, token, secret, api_key/i);
+    assert.match(prompt, /put business-relevant fields first and move bookkeeping or audit fields such as created_by, created_time, deleted, updated_by, updated_time/i);
+    assert.match(prompt, /include an explicit LIMIT unless the user clearly asks for all rows, a full export, or another exact row count/i);
+    assert.match(prompt, /default to a representative preview instead of rendering every cached row in the terminal/i);
+    assert.match(prompt, /Only render all returned rows when the user explicitly asks to see all rows/i);
+    assert.match(prompt, /Do not treat a large SQL LIMIT as a requirement to display that many rows in the terminal/i);
+    assert.match(prompt, /Only set render_last_result expandPreview=true when the user explicitly asked to see all rows/i);
     assert.match(prompt, /render_last_result renders up to 100 rows per call/i);
     assert.match(prompt, /Only paginate with multiple render_last_result calls when the user needs more than 100 visible rows/i);
   });

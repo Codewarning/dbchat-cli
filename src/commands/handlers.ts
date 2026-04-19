@@ -1,10 +1,12 @@
+import path from "node:path";
 import { AgentSession } from "../agent/session.js";
+import { createDatabaseAdapter } from "../db/factory.js";
 import { assessSqlSafety } from "../db/safety.js";
 import { defaultPromptRuntime } from "../ui/prompts.js";
-import { getConfigPath, getMaskedConfig } from "../config/store.js";
+import { getConfigPath, getMaskedConfig, getMaskedResolvedConfig } from "../config/store.js";
 import type { ChatRuntimeState } from "../repl/runtime.js";
+import { initializeScopedInstructionFilesForDatabase } from "../services/scoped-instructions.js";
 import { ensureLocalSchemaCatalogReady, initializeLocalSchemaCatalogOnEntry, refreshLocalSchemaCatalog, searchLocalSchemaCatalog } from "../services/schema-catalog.js";
-import { requireRemoteDataTransferApproval } from "../services/remote-data-consent.js";
 import { executeManagedSql, explainSql } from "../services/sql.js";
 import {
   addDatabaseConfig,
@@ -26,18 +28,50 @@ import {
   printSchemaSummary,
   printTableSchema,
   createRuntimeContext,
+  withResolvedConfig,
   withRuntime,
 } from "./shared.js";
+import { buildResultArtifactDisplayText } from "../ui/result-artifacts.js";
+import type { DatabaseConfig } from "../types/index.js";
+
+async function tryInitializeScopedInstructionFilesForTarget(target: DatabaseConfig): Promise<string | null> {
+  let db = null;
+  try {
+    db = await createDatabaseAdapter(target);
+    await db.testConnection();
+    await initializeScopedInstructionFilesForDatabase(target, db);
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  } finally {
+    if (db) {
+      await db.close();
+    }
+  }
+}
 
 /**
  * Execute a one-shot natural-language task through the agent loop.
  */
 export async function handleAskCommand(prompt: string): Promise<void> {
   await withRuntime(async ({ config, db, io }) => {
+    try {
+      await initializeScopedInstructionFilesForDatabase(config.database, db);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      io.log(`Warning: failed to initialize scoped instruction files: ${message}`);
+    }
     await initializeLocalSchemaCatalogOnEntry(config, db, io);
     const session = new AgentSession(config, db, io);
     const result = await session.run(prompt);
     io.logBlock("Final answer", result.content);
+    for (const block of result.displayBlocks) {
+      io.logBlock(block.title, block.body);
+    }
+    const artifactDisplay = buildResultArtifactDisplayText(result.lastResult?.htmlArtifact);
+    if (artifactDisplay) {
+      io.logBlock("Artifacts", artifactDisplay);
+    }
   });
 }
 
@@ -62,12 +96,14 @@ export async function handleSqlCommand(sql: string): Promise<void> {
       approvalState: { allowAllForCurrentTurn: false },
     });
     if (execution.status === "cancelled") {
-      io.log(execution.reason);
+      if (execution.cancelledBy !== "database_access") {
+        io.log(execution.reason);
+      }
       process.exitCode = 1;
       return;
     }
 
-    printQueryResult(execution.result, config.app.previewRowLimit);
+    printQueryResult(execution.result, config.app.tableRendering);
   });
 }
 
@@ -115,6 +151,12 @@ export async function handleChatCommand(): Promise<void> {
     loggerProfile: "verbose",
     showLifecycleLogs: false,
   });
+  try {
+    await initializeScopedInstructionFilesForDatabase(runtime.config.database, runtime.db);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    runtime.io.log(`Warning: failed to initialize scoped instruction files: ${message}`);
+  }
   await initializeLocalSchemaCatalogOnEntry(runtime.config, runtime.db, runtime.io);
   const state: ChatRuntimeState = {
     config: runtime.config,
@@ -158,7 +200,6 @@ export async function handleChatCommand(): Promise<void> {
  */
 export async function handleCatalogSyncCommand(): Promise<void> {
   await withRuntime(async ({ config, db, io }) => {
-    await requireRemoteDataTransferApproval(io, "catalog_sync");
     const synced = await refreshLocalSchemaCatalog(config, db, io);
     printSchemaCatalogSyncResult(synced.result);
   });
@@ -168,21 +209,33 @@ export async function handleCatalogSyncCommand(): Promise<void> {
  * Search the local schema catalog without opening a chat session.
  */
 export async function handleCatalogSearchCommand(query: string, limit: number): Promise<void> {
-  await withRuntime(async ({ config, db, io }) => {
-    const ready = await ensureLocalSchemaCatalogReady(config, db, io);
-    await requireRemoteDataTransferApproval(io, "catalog_search");
+  await withResolvedConfig(async ({ config, io }) => {
+    const ready = await ensureLocalSchemaCatalogReady(config, io);
     const search = await searchLocalSchemaCatalog(config, ready.catalog, query, limit);
     printSchemaCatalogSearch(search);
   });
 }
 
 /**
- * Print the stored config with secrets redacted for safe inspection.
+ * Print stored config plus the resolved runtime config with secrets redacted for safe inspection.
  */
 export async function handleConfigShowCommand(): Promise<void> {
-  const masked = await getMaskedConfig();
+  const projectEnvPath = path.join(process.cwd(), ".env");
+  const maskedStored = await getMaskedConfig();
   console.log(`Config file: ${getConfigPath()}`);
-  console.log(JSON.stringify(masked, null, 2));
+  console.log(`Config resolution order: shell env > stored config > ${projectEnvPath} > built-in defaults`);
+  console.log("Stored config:");
+  console.log(JSON.stringify(maskedStored, null, 2));
+
+  try {
+    const maskedResolved = await getMaskedResolvedConfig();
+    console.log("Resolved runtime config:");
+    console.log(JSON.stringify(maskedResolved, null, 2));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.log("Resolved runtime config:");
+    console.log(`(unavailable: ${message})`);
+  }
 }
 
 /**
@@ -232,6 +285,12 @@ export async function handleConfigDbRemoveHostCommand(hostName?: string): Promis
 export async function handleConfigDbUseHostCommand(hostName?: string): Promise<void> {
   const result = await useHostConfig(defaultPromptRuntime, hostName);
   console.log(result.message);
+  if (result.nextActiveTarget) {
+    const bootstrapError = await tryInitializeScopedInstructionFilesForTarget(result.nextActiveTarget);
+    if (bootstrapError) {
+      console.log(`Warning: switched the active target, but initializing scoped instruction files failed: ${bootstrapError}`);
+    }
+  }
 }
 
 /**
@@ -264,4 +323,10 @@ export async function handleConfigDbRemoveDatabaseCommand(databaseName?: string,
 export async function handleConfigDbUseDatabaseCommand(databaseName?: string, hostName?: string): Promise<void> {
   const result = await useDatabaseConfig(defaultPromptRuntime, databaseName, hostName);
   console.log(result.message);
+  if (result.nextActiveTarget) {
+    const bootstrapError = await tryInitializeScopedInstructionFilesForTarget(result.nextActiveTarget);
+    if (bootstrapError) {
+      console.log(`Warning: switched the active target, but initializing scoped instruction files failed: ${bootstrapError}`);
+    }
+  }
 }

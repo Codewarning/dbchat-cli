@@ -1,4 +1,4 @@
-import type { NormalizedStoredConfig } from "../config/database-hosts.js";
+import { isActiveDatabaseHostSelection, type NormalizedStoredConfig } from "../config/database-hosts.js";
 import type { SchemaSummary, TableSchema } from "../types/index.js";
 
 /**
@@ -9,7 +9,7 @@ export function buildDatabaseConfigRows(config: NormalizedStoredConfig): Array<R
     if (!host.databases.length) {
       return [
         {
-          activeHost: host.name === config.activeDatabaseHost ? "*" : "",
+          activeHost: isActiveDatabaseHostSelection(config, host) ? "*" : "",
           activeDatabase: "",
           hostConfig: host.name,
           dialect: host.dialect,
@@ -24,8 +24,8 @@ export function buildDatabaseConfigRows(config: NormalizedStoredConfig): Array<R
     }
 
     return host.databases.map((database) => ({
-      activeHost: host.name === config.activeDatabaseHost ? "*" : "",
-      activeDatabase: host.name === config.activeDatabaseHost && database.name === config.activeDatabaseName ? "*" : "",
+      activeHost: isActiveDatabaseHostSelection(config, host) ? "*" : "",
+      activeDatabase: isActiveDatabaseHostSelection(config, host) && database.name === config.activeDatabaseName ? "*" : "",
       hostConfig: host.name,
       dialect: host.dialect,
       host: host.host,

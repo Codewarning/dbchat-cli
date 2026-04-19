@@ -1,5 +1,5 @@
 // Centralized provider and runtime defaults used by init prompts and config resolution.
-import type { AppRuntimeConfig, ContextCompressionConfig, EmbeddingProvider, LlmApiFormat, LlmProvider } from "../types/index.js";
+import type { AppRuntimeConfig, ContextCompressionConfig, EmbeddingProvider, LlmApiFormat, LlmProvider, TableRenderingConfig } from "../types/index.js";
 
 /**
  * Default connection metadata associated with a named LLM provider preset.
@@ -42,11 +42,20 @@ export const DEFAULT_CONTEXT_COMPRESSION_CONFIG: ContextCompressionConfig = {
   largeToolOutputChars: 2400,
   persistedToolPreviewChars: 1200,
   maxToolCallsPerTurn: 12,
+  maxAgentIterations: 24,
+};
+
+export const DEFAULT_TABLE_RENDERING_CONFIG: TableRenderingConfig = {
+  inlineRowLimit: 10,
+  inlineColumnLimit: 8,
+  previewRowLimit: 10,
 };
 
 export const DEFAULT_APP_CONFIG: AppRuntimeConfig = {
   resultRowLimit: 200,
   previewRowLimit: 20,
+  tempArtifactRetentionDays: 3,
+  tableRendering: DEFAULT_TABLE_RENDERING_CONFIG,
   contextCompression: DEFAULT_CONTEXT_COMPRESSION_CONFIG,
 };
 

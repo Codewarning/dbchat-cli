@@ -12,6 +12,7 @@ function stripCodeFences(text: string): string {
 export function normalizeCliText(text: string): string {
   // Remove the most common Markdown constructs while preserving the original wording.
   return stripCodeFences(text)
+    .replace(/!?\[([^\]]+)\]\(([^)\s]+)\)/g, "$1: $2")
     .replace(/`([^`]+)`/g, "$1")
     .replace(/^\s{0,3}#{1,6}\s*/gm, "")
     .replace(/^\s*>\s*/gm, "")

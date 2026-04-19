@@ -5,9 +5,11 @@ import {
   getLlmProviderPreset,
   DEFAULT_APP_CONFIG,
   DEFAULT_CONTEXT_COMPRESSION_CONFIG,
+  DEFAULT_TABLE_RENDERING_CONFIG,
 } from "../config/defaults.js";
+import { loadProjectEnvDefaults } from "../config/env-file.js";
 import { getConfigPath, loadNormalizedStoredConfig, saveNormalizedStoredConfig } from "../config/store.js";
-import type { AppRuntimeConfig, ContextCompressionConfig, LlmApiFormat, LlmProvider } from "../types/index.js";
+import type { AppRuntimeConfig, ContextCompressionConfig, LlmApiFormat, LlmProvider, TableRenderingConfig } from "../types/index.js";
 import { defaultPromptRuntime, type PromptRuntime } from "../ui/prompts.js";
 import { promptEmbeddingConfig } from "./embedding-config-helpers.js";
 import {
@@ -30,6 +32,115 @@ function parsePositiveInteger(value: string, label: string): number {
   return parsed;
 }
 
+function parsePositiveIntegerOverride(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function resolvePositiveIntegerDefault(
+  runtimeValue: string | undefined,
+  storedValue: number | undefined,
+  projectDefaultValue: string | undefined,
+  fallbackValue: number,
+): number {
+  return parsePositiveIntegerOverride(runtimeValue) ?? storedValue ?? parsePositiveIntegerOverride(projectDefaultValue) ?? fallbackValue;
+}
+
+async function resolveAppRuntimePromptDefaults(
+  existing?: {
+    resultRowLimit?: number;
+    previewRowLimit?: number;
+    tempArtifactRetentionDays?: number;
+    tableRendering?: Partial<TableRenderingConfig>;
+    contextCompression?: Partial<ContextCompressionConfig>;
+  },
+): Promise<AppRuntimeConfig> {
+  const projectDefaults = await loadProjectEnvDefaults(process.cwd());
+
+  return {
+    resultRowLimit: resolvePositiveIntegerDefault(
+      process.env.DBCHAT_RESULT_ROW_LIMIT,
+      existing?.resultRowLimit,
+      projectDefaults.DBCHAT_RESULT_ROW_LIMIT,
+      DEFAULT_APP_CONFIG.resultRowLimit,
+    ),
+    previewRowLimit: resolvePositiveIntegerDefault(
+      process.env.DBCHAT_PREVIEW_ROW_LIMIT,
+      existing?.previewRowLimit,
+      projectDefaults.DBCHAT_PREVIEW_ROW_LIMIT,
+      DEFAULT_APP_CONFIG.previewRowLimit,
+    ),
+    tempArtifactRetentionDays: resolvePositiveIntegerDefault(
+      process.env.DBCHAT_TEMP_ARTIFACT_RETENTION_DAYS,
+      existing?.tempArtifactRetentionDays,
+      projectDefaults.DBCHAT_TEMP_ARTIFACT_RETENTION_DAYS,
+      DEFAULT_APP_CONFIG.tempArtifactRetentionDays,
+    ),
+    tableRendering: {
+      inlineRowLimit: resolvePositiveIntegerDefault(
+        process.env.DBCHAT_INLINE_TABLE_ROW_LIMIT,
+        existing?.tableRendering?.inlineRowLimit,
+        projectDefaults.DBCHAT_INLINE_TABLE_ROW_LIMIT,
+        DEFAULT_TABLE_RENDERING_CONFIG.inlineRowLimit,
+      ),
+      inlineColumnLimit: resolvePositiveIntegerDefault(
+        process.env.DBCHAT_INLINE_TABLE_COLUMN_LIMIT,
+        existing?.tableRendering?.inlineColumnLimit,
+        projectDefaults.DBCHAT_INLINE_TABLE_COLUMN_LIMIT,
+        DEFAULT_TABLE_RENDERING_CONFIG.inlineColumnLimit,
+      ),
+      previewRowLimit: resolvePositiveIntegerDefault(
+        process.env.DBCHAT_PREVIEW_TABLE_ROW_LIMIT,
+        existing?.tableRendering?.previewRowLimit,
+        projectDefaults.DBCHAT_PREVIEW_TABLE_ROW_LIMIT,
+        DEFAULT_TABLE_RENDERING_CONFIG.previewRowLimit,
+      ),
+    },
+    contextCompression: {
+      recentRawTurns: resolvePositiveIntegerDefault(
+        process.env.DBCHAT_CONTEXT_RECENT_RAW_TURNS,
+        existing?.contextCompression?.recentRawTurns,
+        projectDefaults.DBCHAT_CONTEXT_RECENT_RAW_TURNS,
+        DEFAULT_CONTEXT_COMPRESSION_CONFIG.recentRawTurns,
+      ),
+      rawHistoryChars: resolvePositiveIntegerDefault(
+        process.env.DBCHAT_CONTEXT_RAW_HISTORY_CHARS,
+        existing?.contextCompression?.rawHistoryChars,
+        projectDefaults.DBCHAT_CONTEXT_RAW_HISTORY_CHARS,
+        DEFAULT_CONTEXT_COMPRESSION_CONFIG.rawHistoryChars,
+      ),
+      largeToolOutputChars: resolvePositiveIntegerDefault(
+        process.env.DBCHAT_CONTEXT_LARGE_TOOL_OUTPUT_CHARS,
+        existing?.contextCompression?.largeToolOutputChars,
+        projectDefaults.DBCHAT_CONTEXT_LARGE_TOOL_OUTPUT_CHARS,
+        DEFAULT_CONTEXT_COMPRESSION_CONFIG.largeToolOutputChars,
+      ),
+      persistedToolPreviewChars: resolvePositiveIntegerDefault(
+        process.env.DBCHAT_CONTEXT_PERSISTED_TOOL_PREVIEW_CHARS,
+        existing?.contextCompression?.persistedToolPreviewChars,
+        projectDefaults.DBCHAT_CONTEXT_PERSISTED_TOOL_PREVIEW_CHARS,
+        DEFAULT_CONTEXT_COMPRESSION_CONFIG.persistedToolPreviewChars,
+      ),
+      maxToolCallsPerTurn: resolvePositiveIntegerDefault(
+        process.env.DBCHAT_CONTEXT_MAX_TOOL_CALLS_PER_TURN,
+        existing?.contextCompression?.maxToolCallsPerTurn,
+        projectDefaults.DBCHAT_CONTEXT_MAX_TOOL_CALLS_PER_TURN,
+        DEFAULT_CONTEXT_COMPRESSION_CONFIG.maxToolCallsPerTurn,
+      ),
+      maxAgentIterations: resolvePositiveIntegerDefault(
+        process.env.DBCHAT_CONTEXT_MAX_AGENT_ITERATIONS,
+        existing?.contextCompression?.maxAgentIterations,
+        projectDefaults.DBCHAT_CONTEXT_MAX_AGENT_ITERATIONS,
+        DEFAULT_CONTEXT_COMPRESSION_CONFIG.maxAgentIterations,
+      ),
+    },
+  };
+}
+
 /**
  * Prompt for app-level runtime limits.
  */
@@ -38,6 +149,8 @@ async function promptAppRuntimeConfig(
   existing?: {
     resultRowLimit?: number;
     previewRowLimit?: number;
+    tempArtifactRetentionDays?: number;
+    tableRendering?: Partial<TableRenderingConfig>;
     contextCompression?: Partial<ContextCompressionConfig>;
   },
 ): Promise<AppRuntimeConfig> {
@@ -65,10 +178,49 @@ async function promptAppRuntimeConfig(
     "Enter a custom preview row limit value",
     "Custom preview limit",
   );
+  const inlineTableRowLimit = await prompts.selectOrInput(
+    "Inline table row limit",
+    [
+      { label: "5", value: "5" },
+      { label: "10", value: "10" },
+      { label: "20", value: "20" },
+    ],
+    String(existing?.tableRendering?.inlineRowLimit ?? DEFAULT_TABLE_RENDERING_CONFIG.inlineRowLimit),
+    "Enter a custom inline table row limit",
+    "Custom inline row limit",
+  );
+  const inlineTableColumnLimit = await prompts.selectOrInput(
+    "Inline table column limit",
+    [
+      { label: "6", value: "6" },
+      { label: "8", value: "8" },
+      { label: "10", value: "10" },
+    ],
+    String(existing?.tableRendering?.inlineColumnLimit ?? DEFAULT_TABLE_RENDERING_CONFIG.inlineColumnLimit),
+    "Enter a custom inline table column limit",
+    "Custom inline column limit",
+  );
+  const previewTableRowLimit = await prompts.selectOrInput(
+    "Large-table preview rows",
+    [
+      { label: "10", value: "10" },
+      { label: "20", value: "20" },
+      { label: "50", value: "50" },
+    ],
+    String(existing?.tableRendering?.previewRowLimit ?? DEFAULT_TABLE_RENDERING_CONFIG.previewRowLimit),
+    "Enter a custom large-table preview row limit",
+    "Custom table preview limit",
+  );
 
   return {
     resultRowLimit: parsePositiveInteger(resultRowLimit, "Max cached result rows"),
     previewRowLimit: parsePositiveInteger(previewRowLimit, "Preview row limit"),
+    tempArtifactRetentionDays: existing?.tempArtifactRetentionDays ?? DEFAULT_APP_CONFIG.tempArtifactRetentionDays,
+    tableRendering: {
+      inlineRowLimit: parsePositiveInteger(inlineTableRowLimit, "Inline table row limit"),
+      inlineColumnLimit: parsePositiveInteger(inlineTableColumnLimit, "Inline table column limit"),
+      previewRowLimit: parsePositiveInteger(previewTableRowLimit, "Large-table preview rows"),
+    },
     contextCompression: {
       ...DEFAULT_CONTEXT_COMPRESSION_CONFIG,
       ...existing?.contextCompression,
@@ -81,6 +233,7 @@ async function promptAppRuntimeConfig(
  */
 export async function handleInitCommand(prompts: PromptRuntime = defaultPromptRuntime): Promise<void> {
   const existing = await loadNormalizedStoredConfig();
+  const appPromptDefaults = await resolveAppRuntimePromptDefaults(existing.app);
   const activeHost = getActiveDatabaseHost(existing);
   const activeDatabase = activeHost ? requireDatabaseEntry(activeHost, existing.activeDatabaseName ?? activeHost.databases[0]?.name ?? "") : undefined;
 
@@ -181,7 +334,7 @@ export async function handleInitCommand(prompts: PromptRuntime = defaultPromptRu
     targetHost.databases.push(databaseEntry);
   }
 
-  existing.app = await promptAppRuntimeConfig(prompts, existing.app);
+  existing.app = await promptAppRuntimeConfig(prompts, appPromptDefaults);
   setActiveSelection(existing, targetHost.name, databaseEntry.name);
 
   await saveNormalizedStoredConfig(existing);

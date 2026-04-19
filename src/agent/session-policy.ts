@@ -1,6 +1,11 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import type { LlmMessageParam } from "../llm/types.js";
+import type { AppRuntimeConfig, QueryExecutionResult, QueryResultHtmlArtifact, TurnDisplayBlock } from "../types/index.js";
 import { normalizeCliText } from "../ui/plain-text.js";
+import { buildQueryResultPreview } from "../ui/query-result-preview.js";
+import { isDirectArtifactAddressLine, stripArtifactReferenceLines } from "../ui/result-artifacts.js";
 
-export const MAX_AGENT_ITERATIONS = 24;
 const MAX_ASSISTANT_HISTORY_CHARS = 560;
 
 export type UserRequestExecutionIntent = "sql_only" | "read_only_results" | "neutral";
@@ -311,14 +316,392 @@ export function looksLikeSqlDraftInsteadOfExecutedResult(content: string | null 
   return /\bnot executed\b|\bwas not executed\b|\bhere(?: is|'s)? the sql\b|\bsql statement\b|\u672a\u6267\u884c|\u6ca1\u6709\u6267\u884c|\u4ee5\u4e0b\u662f\s*sql|sql\u8bed\u53e5/iu.test(content);
 }
 
+function looksLikePlainTextTable(content: string): boolean {
+  return /\n[^\n]+\s\|\s[^\n]+/.test(content) && /\n[-]+(?:-\+-[-]+)+/.test(content);
+}
+
+function looksLikeMarkdownTable(content: string): boolean {
+  const lines = content
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (let index = 0; index < lines.length - 1; index += 1) {
+    const headerLine = lines[index] ?? "";
+    const separatorLine = lines[index + 1] ?? "";
+    if (!/^\|.+\|$/.test(headerLine)) {
+      continue;
+    }
+
+    if (!/^\|(?:\s*:?-{3,}:?\s*\|)+$/.test(separatorLine)) {
+      continue;
+    }
+
+    return true;
+  }
+
+  return false;
+}
+
+function looksLikeAnyTable(content: string): boolean {
+  return looksLikePlainTextTable(content) || looksLikeMarkdownTable(content) || /^SQL result rows /m.test(content);
+}
+
+function isRenderedResultSupportLine(line: string): boolean {
+  return /^(Open full table in a browser:|HTML file:|Open the same cached rows as CSV:|CSV file:|More cached rows are available\.|The HTML file contains )/i.test(
+    line.trim(),
+  );
+}
+
+function extractArtifactTargetFromLine(line: string): string | null {
+  const separatorIndex = line.indexOf(": ");
+  if (separatorIndex < 0) {
+    return null;
+  }
+
+  const candidate = line.slice(separatorIndex + 2).trim();
+  if (!candidate) {
+    return null;
+  }
+
+  if (/^file:\/\//iu.test(candidate)) {
+    return candidate;
+  }
+
+  if (path.win32.isAbsolute(candidate) || path.posix.isAbsolute(candidate)) {
+    return candidate;
+  }
+
+  return null;
+}
+
+function normalizeArtifactTarget(target: string): string | null {
+  const trimmed = target.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  try {
+    if (/^file:\/\//iu.test(trimmed)) {
+      return path.normalize(fileURLToPath(trimmed)).replace(/\\/gu, "/").toLowerCase();
+    }
+  } catch {
+    return null;
+  }
+
+  if (path.win32.isAbsolute(trimmed) || path.posix.isAbsolute(trimmed)) {
+    return path.normalize(trimmed).replace(/\\/gu, "/").toLowerCase();
+  }
+
+  return null;
+}
+
+function extractArtifactTargetsFromContent(content: string): Set<string> {
+  const targets = new Set<string>();
+
+  for (const line of content.split("\n")) {
+    const target = extractArtifactTargetFromLine(line);
+    const normalizedTarget = target ? normalizeArtifactTarget(target) : null;
+    if (normalizedTarget) {
+      targets.add(normalizedTarget);
+    }
+  }
+
+  return targets;
+}
+
+function addArtifactTarget(targets: Set<string>, target: string | undefined): void {
+  const normalizedTarget = target ? normalizeArtifactTarget(target) : null;
+  if (normalizedTarget) {
+    targets.add(normalizedTarget);
+  }
+}
+
+function buildArtifactTargetIndex(htmlArtifact: QueryResultHtmlArtifact | undefined, renderedPages: string[]): Set<string> {
+  const targets = new Set<string>();
+
+  if (htmlArtifact) {
+    addArtifactTarget(targets, htmlArtifact.fileUrl);
+    addArtifactTarget(targets, htmlArtifact.outputPath);
+    addArtifactTarget(targets, htmlArtifact.csvFileUrl);
+    addArtifactTarget(targets, htmlArtifact.csvOutputPath);
+  }
+
+  if (targets.size > 0) {
+    return targets;
+  }
+
+  for (const line of extractRenderedResultSupportLines(renderedPages)) {
+    addArtifactTarget(targets, extractArtifactTargetFromLine(line) ?? undefined);
+  }
+
+  return targets;
+}
+
+function extractRenderedResultSupportLines(renderedPages: string[]): string[] {
+  const seen = new Set<string>();
+  const collected: string[] = [];
+
+  for (const page of renderedPages) {
+    for (const line of page.split("\n")) {
+      const normalizedLine = line.trim();
+      if (!normalizedLine || !isRenderedResultSupportLine(normalizedLine) || seen.has(normalizedLine)) {
+        continue;
+      }
+
+      seen.add(normalizedLine);
+      collected.push(normalizedLine);
+    }
+  }
+
+  return collected;
+}
+
+function getRenderedResultPages(messages: LlmMessageParam[]): string[] {
+  return messages
+    .filter((message): message is Extract<LlmMessageParam, { role: "tool" }> => message.role === "tool")
+    .map((message) => message.content.trim())
+    .filter((content) => /^SQL result rows /m.test(content) && looksLikePlainTextTable(content));
+}
+
+function attachRenderedResultPages(content: string, renderedPages: string[], artifactTargets: Set<string>): string {
+  if (!renderedPages.length) {
+    return content;
+  }
+
+  const strippedRenderedPages = renderedPages
+    .map((page) =>
+      page
+        .split("\n")
+        .filter((line) => !isDirectArtifactAddressLine(line))
+        .join("\n")
+        .trim(),
+    )
+    .filter(Boolean);
+
+  if (strippedRenderedPages.length && strippedRenderedPages.every((page) => content.includes(page))) {
+    return content;
+  }
+
+  if (looksLikeAnyTable(content)) {
+    const referencedArtifactTargets = extractArtifactTargetsFromContent(content);
+    const supportLines = extractRenderedResultSupportLines(renderedPages).filter((line) => {
+      if (isDirectArtifactAddressLine(line)) {
+        return false;
+      }
+
+      if (content.includes(line)) {
+        return false;
+      }
+
+      const target = extractArtifactTargetFromLine(line);
+      const normalizedTarget = target ? normalizeArtifactTarget(target) : null;
+      if (normalizedTarget && artifactTargets.has(normalizedTarget) && referencedArtifactTargets.has(normalizedTarget)) {
+        return false;
+      }
+
+      return true;
+    });
+    if (!supportLines.length) {
+      return content;
+    }
+
+    return `${content}\n\n${supportLines.join("\n")}`.trim();
+  }
+
+  if (!strippedRenderedPages.length) {
+    return content;
+  }
+
+  return `${content}\n\n${strippedRenderedPages.join("\n\n")}`.trim();
+}
+
+function buildFallbackResultPreview(lastResult: QueryExecutionResult | null, appConfig: AppRuntimeConfig): string | null {
+  if (!lastResult || (!lastResult.rows.length && !lastResult.fields.length)) {
+    return null;
+  }
+
+  return stripArtifactReferenceLines(
+    buildQueryResultPreview(lastResult, {
+      tableRendering: appConfig.tableRendering,
+    }).renderedText,
+  );
+}
+
+function hasSeparateRenderedResultPreview(displayBlocks: TurnDisplayBlock[] | undefined): boolean {
+  return Boolean(displayBlocks?.some((block) => block.kind === "result_table" && block.body.trim()));
+}
+
+function extractKnownResultFields(lastResult: QueryExecutionResult): Set<string> {
+  return new Set(lastResult.fields.map((field) => field.trim().toLowerCase()).filter(Boolean));
+}
+
+function countKnownFieldOverlap(cells: string[], knownFields: Set<string>): number {
+  return cells.filter((cell) => knownFields.has(cell.trim().toLowerCase())).length;
+}
+
+function extractTableHeaderCells(block: string): string[] {
+  const trimmedLines = block
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (let index = 0; index < trimmedLines.length - 1; index += 1) {
+    const headerLine = trimmedLines[index] ?? "";
+    const separatorLine = trimmedLines[index + 1] ?? "";
+    if (!/^\|.+\|$/.test(headerLine) || !/^\|(?:\s*:?-{3,}:?\s*\|)+$/.test(separatorLine)) {
+      continue;
+    }
+
+    return headerLine
+      .split("|")
+      .map((cell) => cell.trim())
+      .filter(Boolean);
+  }
+
+  for (let index = 1; index < trimmedLines.length; index += 1) {
+    const separatorLine = trimmedLines[index] ?? "";
+    if (!/^-+(?:-\+-[-]+)+$/.test(separatorLine)) {
+      continue;
+    }
+
+    return (trimmedLines[index - 1] ?? "")
+      .split("|")
+      .map((cell) => cell.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+function blockLooksLikeManualResultTable(block: string, lastResult: QueryExecutionResult): boolean {
+  const normalizedBlock = block.trim();
+  if (!normalizedBlock) {
+    return false;
+  }
+
+  if (/^SQL result rows /m.test(normalizedBlock)) {
+    return true;
+  }
+
+  if (!looksLikeAnyTable(normalizedBlock)) {
+    return false;
+  }
+
+  const headerCells = extractTableHeaderCells(normalizedBlock);
+  if (!headerCells.length) {
+    return false;
+  }
+
+  const knownFields = extractKnownResultFields(lastResult);
+  if (!knownFields.size) {
+    return false;
+  }
+
+  return countKnownFieldOverlap(headerCells, knownFields) >= Math.min(2, knownFields.size);
+}
+
+function stripManualResultTableBlocks(
+  content: string,
+  lastResult: QueryExecutionResult | null,
+  displayBlocks: TurnDisplayBlock[] | undefined,
+): string {
+  if (!lastResult || !hasSeparateRenderedResultPreview(displayBlocks)) {
+    return content;
+  }
+
+  const blocks = content.split(/\n{2,}/);
+  let removedBlocks = 0;
+  const retainedBlocks = blocks.filter((block) => {
+    const normalizedBlock = block.trim();
+    if (!normalizedBlock) {
+      return false;
+    }
+
+    if (
+      !blockLooksLikeManualResultTable(normalizedBlock, lastResult) &&
+      !looksLikeMarkdownTable(normalizedBlock) &&
+      !looksLikePlainTextTable(normalizedBlock)
+    ) {
+      return true;
+    }
+
+    removedBlocks += 1;
+    return false;
+  });
+
+  if (!removedBlocks) {
+    return content;
+  }
+
+  return retainedBlocks.join("\n\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function stripManualResultFieldLines(content: string, lastResult: QueryExecutionResult | null, displayBlocks: TurnDisplayBlock[] | undefined): string {
+  if (!lastResult || !hasSeparateRenderedResultPreview(displayBlocks)) {
+    return content;
+  }
+
+  const knownFields = extractKnownResultFields(lastResult);
+  if (!knownFields.size) {
+    return content;
+  }
+
+  const lines = content.split("\n");
+  let removedFieldLines = 0;
+  const retainedLines = lines.filter((line) => {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s+.+$/u);
+    const fieldName = match?.[1]?.trim().toLowerCase();
+    if (!fieldName || !knownFields.has(fieldName)) {
+      return true;
+    }
+
+    removedFieldLines += 1;
+    return false;
+  });
+
+  if (removedFieldLines < 2) {
+    return content;
+  }
+
+  return retainedLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 export function buildFinalAgentContent(options: {
   responseContent: string | null | undefined;
   lastToolFailure: { toolName: string; message: string } | null;
   toolCallsThisTurn: number;
+  currentTurnMessages: LlmMessageParam[];
+  lastResult: QueryExecutionResult | null;
+  appConfig: AppRuntimeConfig;
+  displayBlocks?: TurnDisplayBlock[];
 }): string {
   const trimmedContent = options.responseContent?.trim() ?? "";
+  const renderedPages = getRenderedResultPages(options.currentTurnMessages);
+  const artifactTargets = buildArtifactTargetIndex(options.lastResult?.htmlArtifact, renderedPages);
+  const fallbackPreview = renderedPages.length ? null : buildFallbackResultPreview(options.lastResult, options.appConfig);
   if (trimmedContent) {
-    return normalizeAssistantContent(trimmedContent);
+    const normalizedContent = stripManualResultTableBlocks(
+      stripManualResultFieldLines(
+        stripArtifactReferenceLines(normalizeAssistantContent(trimmedContent)),
+        options.lastResult,
+        options.displayBlocks,
+      ),
+      options.lastResult,
+      options.displayBlocks,
+    );
+    const withoutArtifactSupportLines = attachRenderedResultPages(normalizedContent, renderedPages, artifactTargets);
+    if (withoutArtifactSupportLines) {
+      return withoutArtifactSupportLines;
+    }
+
+    if (options.lastResult) {
+      return normalizeCliText("Query executed. A result preview is shown in the terminal output.");
+    }
+  }
+
+  if ((renderedPages.length || fallbackPreview) && !options.lastToolFailure) {
+    return normalizeCliText("Query executed. A result preview is shown in the terminal output.");
   }
 
   if (options.lastToolFailure) {

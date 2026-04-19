@@ -3,6 +3,7 @@ import { ensureSingleStatement } from "../db/safety.js";
 import { refreshSchemaCatalogAfterSqlIfNeeded, type SchemaCatalogRefreshOutcome } from "../schema/catalog.js";
 import { executeSqlStatement, type ExecuteSqlStatementOptions, type SqlExecutionCancelled, type SqlExecutionSuccess } from "../sql/execution.js";
 import type { AgentIO, AppConfig, MutationApprovalState, QueryPlanResult } from "../types/index.js";
+import { attachQueryResultHtmlArtifact } from "../ui/query-result-html.js";
 
 export interface ExecuteManagedSqlOptions {
   config: AppConfig;
@@ -38,8 +39,17 @@ export async function executeManagedSql(options: ExecuteManagedSqlOptions): Prom
     return execution;
   }
 
+  let result = execution.result;
+  try {
+    result = await attachQueryResultHtmlArtifact(result, options.io.cwd);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    options.io.log(`Result HTML generation skipped: ${message}`);
+  }
+
   return {
     ...execution,
+    result,
     catalogRefresh: await refreshSchemaCatalogAfterSqlIfNeeded(
       options.config,
       options.db,

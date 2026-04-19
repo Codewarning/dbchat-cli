@@ -65,16 +65,13 @@ export function shouldRefreshSchemaCatalogAfterSql(sql: string, operation: SqlOp
  * Report when a successful schema-changing SQL statement leaves the local schema catalog stale.
  */
 export async function refreshSchemaCatalogAfterSqlIfNeeded(
-  config: AppConfig,
-  db: DatabaseAdapter,
+  _config: AppConfig,
+  _db: DatabaseAdapter,
   io: AgentIO,
   sql: string,
   operation: SqlOperation,
-  allowRemoteRefresh = true,
+  _allowRemoteRefresh = true,
 ): Promise<SchemaCatalogRefreshOutcome> {
-  void config;
-  void db;
-  void allowRemoteRefresh;
   if (!shouldRefreshSchemaCatalogAfterSql(sql, operation)) {
     return {
       status: "not_needed",

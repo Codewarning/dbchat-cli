@@ -12,6 +12,7 @@ import type {
   QueryPlanResult,
   QueryExecutionResult,
   SchemaCatalog,
+  TurnDisplayBlock,
 } from "../types/index.js";
 
 /**
@@ -44,6 +45,7 @@ export interface ToolRuntimeContext {
   setLastResult(result: QueryExecutionResult | null): void;
   getLastExplain(): QueryPlanResult | null;
   setLastExplain(result: QueryPlanResult | null): void;
+  pushDisplayBlock(block: TurnDisplayBlock): void;
   history: ToolHistoryInspector;
   mutationApproval: MutationApprovalState;
 }

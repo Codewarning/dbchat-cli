@@ -17,7 +17,7 @@ The repo is intentionally small and layered. Avoid turning it into a framework-h
 - `init`
   Configure LLM provider, embedding provider, base URL, model, and database connection.
 - `config show`
-  Show masked config.
+  Show masked stored config and, when it can be resolved, the masked runtime config after shell env and project `.env` defaults are applied. This is also the primary diagnostic command when a database-backed command cannot start because the active database target is incomplete.
 - `config embedding update`
   Reopen only the embedding API configuration flow.
 - `schema`
@@ -31,7 +31,7 @@ The repo is intentionally small and layered. Avoid turning it into a framework-h
 - `ask`
   One-shot natural-language request.
 - `chat`
-  Interactive REPL with the same tool-backed agent loop.
+  Interactive REPL with the same tool-backed agent loop and per-target scoped instruction loading.
 
 ## Product Expectations
 
@@ -41,6 +41,7 @@ The repo is intentionally small and layered. Avoid turning it into a framework-h
 - Prefer inspect -> reason -> execute over guessing.
 - Keep prompts and tool descriptions clear and operational.
 - Keep one-shot terminal output compact; richer execution traces belong in chat mode.
+- Terminal result tables stay compact by using fixed-width cells with truncation instead of multiline wrapping.
 
 ## Constraints
 
@@ -59,10 +60,19 @@ The repo is intentionally small and layered. Avoid turning it into a framework-h
   - stores multiple database host configs
   - stores multiple database names under each host
   - stores the active host/database selection
+  - allows switching directly to an already-stored database entry even when the server is temporarily unreachable
   - does not store runtime SQL access presets
+- Project default env file: `./.env`
+  - provides repo-local default values for supported runtime env settings, including `DBCHAT_*` variables and provider-specific API-key aliases such as `OPENAI_API_KEY`
+  - sits below shell env and stored config in precedence
 - Local schema catalog directory: `~/.db-chat-cli/schema-catalog/`
-  - stores one schema snapshot per physical database target in nested directories grouped by dialect, host-port, and database
-  - stores table-level hashes, LLM-generated descriptions/tags, and embedding vectors used before live introspection
+  - stores one `catalog.json` snapshot per physical database target in nested directories grouped by dialect, host-port, and database
+  - stores table-level hashes, an instruction fingerprint, local search documents, and optional embedding vectors built during explicit catalog sync
+- Scoped instruction directory: `~/.db-chat-cli/agents/`
+  - supports root-level `AGENTS.md`, host-level `AGENTS.md`, database-level `AGENTS.md`, and per-table `tables/<table>.md`
+  - uses `database > host > global` precedence for both runtime prompts and catalog rebuilds
+  - auto-creates missing files as blank files when a database target is selected or switched successfully, while leaving existing files untouched
+  - supports optional `Shared`, `Runtime`, and `Catalog` sections so prompt-time and catalog-time views can differ without duplicating whole files
 - In-memory state only for:
   - current plan
   - latest query result cache used for follow-up inspection and export

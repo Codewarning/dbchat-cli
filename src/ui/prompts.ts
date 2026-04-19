@@ -1,4 +1,5 @@
 // Minimal readline-based terminal prompts shared by commands and tool confirmations.
+import { readFileSync } from "node:fs";
 import { emitKeypressEvents } from "node:readline";
 import { createInterface } from "node:readline/promises";
 import process from "node:process";
@@ -35,6 +36,7 @@ const CUSTOM_SELECT_VALUE = "__custom__";
 const APPROVE_ONCE_VALUE: SqlApprovalDecision = "approve_once";
 const APPROVE_ALL_VALUE: SqlApprovalDecision = "approve_all";
 const REJECT_SQL_VALUE: SqlApprovalDecision = "reject";
+let bufferedNonInteractivePromptLines: string[] | null = null;
 
 function deduplicateChoices<T extends string>(choices: SelectChoice<T>[]): SelectChoice<T>[] {
   return choices.filter((choice, index) => choices.findIndex((candidate) => candidate.value === choice.value) === index);
@@ -129,10 +131,34 @@ export function buildSelectOrInputChoices(
   };
 }
 
+function loadBufferedNonInteractivePromptLines(): string[] {
+  if (bufferedNonInteractivePromptLines) {
+    return bufferedNonInteractivePromptLines;
+  }
+
+  const bufferedInput = readFileSync(0, "utf8");
+  const lines = bufferedInput.split(/\r?\n/u);
+  if (lines.at(-1) === "") {
+    lines.pop();
+  }
+
+  bufferedNonInteractivePromptLines = lines;
+  return bufferedNonInteractivePromptLines;
+}
+
+function consumeBufferedNonInteractivePromptLine(): string {
+  return loadBufferedNonInteractivePromptLines().shift() ?? "";
+}
+
 /**
  * Ask one question and resolve with the raw terminal input.
  */
 async function ask(question: string): Promise<string> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    process.stdout.write(question);
+    return consumeBufferedNonInteractivePromptLine();
+  }
+
   // Create a short-lived readline instance per prompt to keep the helpers stateless.
   const rl = createInterface({
     input: process.stdin,
